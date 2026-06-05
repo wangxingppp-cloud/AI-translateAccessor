@@ -43,16 +43,15 @@ function createWindow() {
     height: 670,
     minWidth: 600,
     minHeight: 400,
-    frame: false, // Custom title bar
+    frame: false,
     titleBarStyle: 'hidden',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
-  // Handle window state for custom title bar
   mainWindow.on('maximize', () => mainWindow?.webContents.send('window-maximized', true));
   mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window-maximized', false));
 
@@ -64,12 +63,47 @@ function createWindow() {
   }
 }
 
+// ── IPC Handlers ──────────────────────────────────────────────
+
+function registerWindowIPC() {
+  ipcMain.on('window:minimize', () => mainWindow?.minimize());
+  ipcMain.on('window:maximize', () => {
+    if (mainWindow?.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow?.maximize();
+    }
+  });
+  ipcMain.on('window:close', () => mainWindow?.close());
+  ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false);
+
+  ipcMain.handle('app:getVersion', () => app.getVersion());
+  ipcMain.handle('app:getPlatform', () => process.platform);
+}
+
 // ── App lifecycle ────────────────────────────────────────────
+
 app.whenReady().then(() => {
+  registerWindowIPC();
+
+  // Register audio IPC (wrapped in try/catch so a missing native module
+  // doesn't prevent the window from opening)
+  try {
+    // Use dynamic import for ESM compatibility
+    import('./ipc/audio.js').then(({ registerAudioIPC }) => {
+      if (mainWindow) {
+        registerAudioIPC(mainWindow);
+      }
+    }).catch((err) => {
+      console.error('Audio IPC registration failed (non-fatal):', err.message);
+    });
+  } catch (err) {
+    console.error('Audio IPC import failed (non-fatal):', err);
+  }
+
   createWindow();
 
   app.on('activate', () => {
-    // macOS: re-create window when dock icon clicked
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
@@ -81,20 +115,3 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
-
-// ── IPC Handlers ──────────────────────────────────────────────
-// Window controls
-ipcMain.on('window:minimize', () => mainWindow?.minimize());
-ipcMain.on('window:maximize', () => {
-  if (mainWindow?.isMaximized()) {
-    mainWindow.unmaximize();
-  } else {
-    mainWindow?.maximize();
-  }
-});
-ipcMain.on('window:close', () => mainWindow?.close());
-ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false);
-
-// App info
-ipcMain.handle('app:getVersion', () => app.getVersion());
-ipcMain.handle('app:getPlatform', () => process.platform);
