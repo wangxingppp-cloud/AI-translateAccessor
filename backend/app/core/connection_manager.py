@@ -16,8 +16,7 @@ class ConnectionManager:
         self._session_tasks: dict[str, set[asyncio.Task]] = {}
 
     async def connect(self, session_id: str, websocket: WebSocket) -> None:
-        """Accept a new WebSocket connection and register it."""
-        await websocket.accept()
+        """Register a new WebSocket connection (accept is handled by FastAPI)."""
         self._connections[session_id] = websocket
         self._session_tasks[session_id] = set()
         logger.info(f"Session [{session_id}] connected ({len(self._connections)} active)")
