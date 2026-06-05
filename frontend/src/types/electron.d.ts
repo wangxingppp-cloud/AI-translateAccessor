@@ -10,6 +10,20 @@ export interface ElectronAPI {
     getVersion: () => Promise<string>;
     getPlatform: () => Promise<NodeJS.Platform>;
   };
+  audio: {
+    listDevices: () => Promise<SystemAudioDeviceInfo[]>;
+    startSystemCapture: (deviceId: string | null) => Promise<{ success: boolean }>;
+    stopSystemCapture: () => Promise<{ success: boolean }>;
+    onSystemAudio: (callback: (chunk: ArrayBuffer) => void) => () => void;
+    onSystemAudioError: (callback: (message: string) => void) => () => void;
+  };
+}
+
+export interface SystemAudioDeviceInfo {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  isLoopback: boolean;
 }
 
 declare global {
