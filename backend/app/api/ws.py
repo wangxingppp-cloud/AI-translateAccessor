@@ -5,26 +5,48 @@ The /ws/translate endpoint is the main pipeline for real-time translation:
   - Client sends binary PCM audio chunks + JSON control messages
   - Server sends subtitle JSON (draft → corrected → final) + status + errors
 
+Pipeline:  PCM bytes → float32 → VAD → ASR → subtitle_draft → client
+
 Protocol frames are defined in models/subtitle.py and models/session.py.
 """
 import json
 import time
-import asyncio
 import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
 
 from ..core.connection_manager import manager
 from ..core.session_manager import sessions, SessionState, SessionConfig
-from ..models.subtitle import StatusMessage, ErrorMessage
+from ..models.subtitle import (
+    StatusMessage, ErrorMessage, SubtitleDraft, SubtitleFinal,
+)
 from ..models.glossary import Term
+from ..engines.asr.stream_handler import StreamHandler
 
 router = APIRouter()
+
+# ── Per-session ASR handlers ────────────────────────────────────
+
+_session_handlers: dict[str, StreamHandler] = {}
+
+
+def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
+    """Get or create a StreamHandler for a session."""
+    if session_id not in _session_handlers and create:
+        _session_handlers[session_id] = StreamHandler()
+    return _session_handlers.get(session_id)
+
+
+def _remove_handler(session_id: str) -> None:
+    handler = _session_handlers.pop(session_id, None)
+    if handler:
+        handler.reset()
+
 
 # ── Control message handlers ────────────────────────────────────
 
 async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
-    """Handle start control message — initialize a translation session."""
+    """Handle start — initialize session and ASR handler."""
     config = payload.get("config", {})
     glossary_raw = config.get("glossary", [])
 
@@ -44,6 +66,9 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
         )
         return
 
+    # Initialize ASR handler
+    _get_handler(session_id, create=True)
+
     sessions.update_state(session_id, SessionState.LISTENING)
     await ws.send_json(
         StatusMessage(
@@ -55,7 +80,6 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
 
 
 async def _handle_pause(session_id: str, _ws: WebSocket, _payload: dict) -> None:
-    """Handle pause — suspend audio processing."""
     try:
         sessions.update_state(session_id, SessionState.PAUSED)
     except KeyError:
@@ -63,7 +87,6 @@ async def _handle_pause(session_id: str, _ws: WebSocket, _payload: dict) -> None
 
 
 async def _handle_resume(session_id: str, _ws: WebSocket, _payload: dict) -> None:
-    """Handle resume — continue audio processing."""
     try:
         sessions.update_state(session_id, SessionState.LISTENING)
     except KeyError:
@@ -71,9 +94,23 @@ async def _handle_resume(session_id: str, _ws: WebSocket, _payload: dict) -> Non
 
 
 async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
-    """Handle stop — end the translation session."""
+    """Handle stop — flush ASR buffer and clean up."""
     try:
-        sessions.update_state(session_id, SessionState.ENDED)
+        # Flush any pending ASR results before ending
+        handler = _get_handler(session_id)
+        if handler and handler.has_pending_speech():
+            final_result = await handler.flush()
+            if final_result and final_result.text:
+                await ws.send_json(
+                    SubtitleFinal(
+                        sequence_id=str(uuid.uuid4()),
+                        original=final_result.text,
+                        translated="",  # Will be filled by translation module
+                        confidence=final_result.confidence,
+                        timestamp=final_result.timestamp,
+                    ).model_dump()
+                )
+
         session = sessions.get(session_id)
         if session:
             await ws.send_json(
@@ -82,13 +119,14 @@ async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
                     message=f"Session ended: {session.total_sentences} sentences, {session.total_audio_chunks} chunks",
                 ).model_dump()
             )
+
+        _remove_handler(session_id)
         sessions.remove(session_id)
     except KeyError:
         pass
 
 
 async def _handle_update_glossary(session_id: str, _ws: WebSocket, payload: dict) -> None:
-    """Handle dynamic glossary update mid-session."""
     try:
         session = sessions.require(session_id)
         terms_raw = payload.get("terms", [])
@@ -98,11 +136,9 @@ async def _handle_update_glossary(session_id: str, _ws: WebSocket, payload: dict
 
 
 async def _handle_ping(_session_id: str, ws: WebSocket, _payload: dict) -> None:
-    """Respond to client heartbeat."""
     await ws.send_json({"type": "pong", "timestamp": time.time()})
 
 
-# Control message router
 _CONTROL_HANDLERS = {
     "start": _handle_start,
     "pause": _handle_pause,
@@ -114,7 +150,6 @@ _CONTROL_HANDLERS = {
 
 
 async def _process_control_message(session_id: str, ws: WebSocket, text: str) -> None:
-    """Parse and route a JSON control message."""
     try:
         message = json.loads(text)
     except json.JSONDecodeError:
@@ -133,15 +168,13 @@ async def _process_control_message(session_id: str, ws: WebSocket, text: str) ->
 
 
 async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> None:
-    """Process an audio chunk.
+    """Process audio chunk through the ASR pipeline.
 
-    Placeholder — will be wired to Sherpa-onnx ASR engine in ASR module.
-    Currently: acknowledges receipt and tracks metrics.
+    PCM bytes → float32 samples → VAD → ASR decode → subtitle_draft → client
     """
     try:
         session = sessions.require(session_id)
     except KeyError:
-        # Session not started yet — send error
         await ws.send_json(
             ErrorMessage(
                 code="NO_SESSION",
@@ -151,19 +184,31 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
         return
 
     if session.state != SessionState.LISTENING:
-        return  # Silently drop audio when paused / ended
+        return
 
     sessions.record_audio_chunk(session_id)
 
-    # Placeholder response (will be replaced by ASR → translation pipeline)
-    # Currently sends a status update every 50 chunks (~10s at 200ms/chunk)
-    if session.total_audio_chunks % 50 == 0:
-        await ws.send_json(
-            StatusMessage(
-                status="listening",
-                message=f"Audio chunks received: {session.total_audio_chunks}",
-            ).model_dump()
-        )
+    handler = _get_handler(session_id)
+    if not handler:
+        return
+
+    try:
+        async for result in handler.process_chunk(data):
+            if result.text:
+                sessions.record_sentence(session_id)
+                await ws.send_json(
+                    SubtitleDraft(
+                        sequence_id=str(uuid.uuid4()),
+                        original=result.text,
+                        translated=result.text,  # Placeholder — translation module fills this
+                        is_sentence_end=result.is_final,
+                        confidence=result.confidence,
+                        latency_ms=0,
+                        timestamp=result.timestamp,
+                    ).model_dump()
+                )
+    except Exception as e:
+        logger.error(f"ASR processing error [{session_id}]: {e}")
 
 
 # ── Main WebSocket endpoint ──────────────────────────────────────
@@ -174,20 +219,18 @@ async def translate_websocket(websocket: WebSocket):
     Main translation WebSocket endpoint.
 
     Client → Server:
-      Binary: 16-bit PCM audio, 16kHz, mono, 200ms chunks
+      Binary: 16-bit PCM audio, 16kHz, mono, ~200ms chunks
       Text (JSON): {"type": "start"|"pause"|"resume"|"stop"|"update_glossary"|"ping", ...}
 
     Server → Client (JSON):
-      subtitle_draft  — NMT initial translation (real-time)
-      subtitle_corrected — LLM-corrected translation (async)
-      subtitle_final — finalized sentence
-      status         — pipeline status + metrics
-      error          — error with recovery info
-      pong           — heartbeat response
+      subtitle_draft  — ASR result in progress
+      subtitle_final  — finalized sentence
+      status          — pipeline status + metrics
+      error           — error with recovery info
+      pong            — heartbeat response
     """
     now = time.time()
 
-    # Check capacity — accept then reject if full
     if sessions.is_at_capacity:
         await websocket.accept()
         await websocket.send_json(
@@ -199,10 +242,7 @@ async def translate_websocket(websocket: WebSocket):
         await websocket.close()
         return
 
-    # Accept the WebSocket (required before sending)
     await websocket.accept()
-
-    # Register session
     session_id = str(uuid.uuid4())
     await manager.connect(session_id, websocket)
 
@@ -215,12 +255,10 @@ async def translate_websocket(websocket: WebSocket):
 
     try:
         while True:
-            # Receive either binary (audio) or text (control) frames
             data = await websocket.receive()
 
             if "text" in data:
                 await _process_control_message(session_id, websocket, data["text"])
-
             elif "bytes" in data:
                 await _process_audio_chunk(session_id, websocket, data["bytes"])
 
@@ -240,7 +278,7 @@ async def translate_websocket(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        # Cleanup
+        _remove_handler(session_id)
         sessions.remove(session_id)
         manager.disconnect(session_id)
         elapsed = time.time() - now
