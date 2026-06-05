@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_PROVIDER=openai
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./models:/app/models        # ASR model files
+      - ./data:/app/data            # SQLite data persistence
+      - ./logs:/app/logs            # Log files
+      - .:/app                      # Hot-reload during development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
