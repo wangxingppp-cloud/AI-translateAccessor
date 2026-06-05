@@ -3,8 +3,8 @@ fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 websockets>=12.0
 
-# Sherpa-onnx ASR (will be installed when ASR module is built)
-# sherpa-onnx
+# Sherpa-onnx ASR
+sherpa-onnx>=1.10
 
 # NMT Translation (will be installed when translation module is built)
 # transformers
