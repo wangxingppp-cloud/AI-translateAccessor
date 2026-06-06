@@ -1,0 +1,1 @@
+export { GlossaryManager } from './GlossaryManager';
