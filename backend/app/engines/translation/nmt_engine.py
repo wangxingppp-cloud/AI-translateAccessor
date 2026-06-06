@@ -108,10 +108,11 @@ class NMTEngine:
 
     def _detect_backend(self) -> str:
         """Auto-select the best available backend."""
-        # ONNX: check for model file
-        onnx_path = self._model_dir / "model.onnx"
-        if onnx_path.exists():
-            logger.info(f"NMT: ONNX model found at {onnx_path}")
+        # ONNX: check for encoder/decoder ONNX files (any filename pattern)
+        enc_files = list(self._model_dir.glob("encoder_model*.onnx"))
+        dec_files = list(self._model_dir.glob("decoder_model*.onnx"))
+        if enc_files and dec_files:
+            logger.info(f"NMT: ONNX model found at {self._model_dir}")
             return "onnx"
 
         # Transformers: check if library is importable
@@ -143,70 +144,79 @@ class NMTEngine:
     # ── ONNX backend ────────────────────────────────────────────
 
     async def _init_onnx(self) -> None:
-        """Initialize ONNX Runtime inference session + tokenizer."""
+        """Initialize ONNX Runtime with encoder + decoder + vocab."""
         import onnxruntime as ort
+        import sentencepiece as spm
+        import json
 
-        model_path = str(self._model_dir / "model.onnx")
-
-        # ONNX Runtime with CPU optimization
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        opts.intra_op_num_threads = 4
         providers = ort.get_available_providers()
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_options.intra_op_num_threads = 4
 
-        self._session = await asyncio.to_thread(
-            ort.InferenceSession, model_path, sess_options, providers=providers
-        )
+        enc_path = str(next(self._model_dir.glob("encoder_model*.onnx")))
+        dec_path = str(next(self._model_dir.glob("decoder_model*.onnx")))
 
-        # Try to load a tokenizer (sentencepiece or HF tokenizer)
-        tokenizer_path = self._model_dir / "tokenizer.json"
-        spm_path = self._model_dir / "source.spm"
+        self._enc_sess = await asyncio.to_thread(
+            ort.InferenceSession, enc_path, opts, providers=providers)
+        self._dec_sess = await asyncio.to_thread(
+            ort.InferenceSession, dec_path, opts, providers=providers)
 
-        if tokenizer_path.exists():
-            from transformers import AutoTokenizer
-            self._tokenizer = await asyncio.to_thread(
-                AutoTokenizer.from_pretrained, str(self._model_dir)
-            )
-        elif spm_path.exists():
-            import sentencepiece as spm
-            self._tokenizer = spm.SentencePieceProcessor()
-            self._tokenizer.Load(str(spm_path))
-        else:
-            logger.warning("No tokenizer found for ONNX NMT model — echo mode")
-            self._backend = "echo"
-            return
+        # Source tokenizer (SentencePiece, works for English)
+        self._src_spm = spm.SentencePieceProcessor()
+        self._src_spm.Load(str(self._model_dir / "source.spm"))
 
-        logger.info(f"NMT ONNX backend ready (providers: {providers})")
+        # Target vocab (65001 tokens, use vocab.json for decoding)
+        with open(self._model_dir / "vocab.json", encoding="utf-8") as f:
+            vocab = json.load(f)
+        self._id2token = {int(v): k for k, v in vocab.items()}
+
+        logger.info(f"NMT ONNX backend ready ({providers})")
 
     def _translate_onnx(self, text: str) -> str:
-        """Translate using ONNX Runtime."""
-        if self._session is None or self._tokenizer is None:
+        """Translate using ONNX encoder-decoder."""
+        # Tokenize with source SentencePiece
+        input_ids = self._src_spm.encode(text, out_type=int)
+        if not input_ids:
             return text
 
-        # Tokenize input
-        if hasattr(self._tokenizer, 'encode'):
-            # SentencePiece tokenizer
-            input_ids = self._tokenizer.encode(text, out_type=int)
-            input_ids = np.array([input_ids], dtype=np.int64)
-            attention_mask = np.ones_like(input_ids)
-        else:
-            # HuggingFace tokenizer
-            encoded = self._tokenizer(text, return_tensors="np", padding=True, truncation=True)
-            input_ids = encoded["input_ids"]
-            attention_mask = encoded.get("attention_mask")
+        input_ids = np.array([input_ids], dtype=np.int64)
+        attention_mask = np.ones(input_ids.shape, dtype=np.int64)
 
-        # Run inference
-        outputs = self._session.run(
-            None,
-            {"input_ids": input_ids, "attention_mask": attention_mask},
-        )
-        output_ids = outputs[0][0]
+        # Encode
+        enc_out = self._enc_sess.run(
+            None, {"input_ids": input_ids, "attention_mask": attention_mask}
+        )[0]
 
-        # Decode output
-        if hasattr(self._tokenizer, 'decode'):
-            return self._tokenizer.decode(output_ids.tolist())
-        else:
-            return self._tokenizer.decode(output_ids, skip_special_tokens=True)
+        # Autoregressive decode
+        start_id = 65000  # <pad> = decoder_start_token_id
+        eos_id = 0        # </s> = eos_token_id
+        decoder_input = np.array([[start_id]], dtype=np.int64)
+        max_len = 128
+        output_ids = []
+
+        for _ in range(max_len):
+            dec_out = self._dec_sess.run(
+                None, {
+                    "input_ids": decoder_input,
+                    "encoder_hidden_states": enc_out,
+                    "encoder_attention_mask": attention_mask,
+                }
+            )
+            logits = dec_out[0][0, -1, :]
+            next_id = int(np.argmax(logits))
+            if next_id == eos_id:
+                break
+            output_ids.append(next_id)
+            decoder_input = np.hstack([decoder_input, np.array([[next_id]], dtype=np.int64)])
+
+        # Decode with full 65001 vocab
+        if output_ids:
+            raw = "".join(self._id2token.get(tid, "") for tid in output_ids)
+            # SentencePiece detokenization: remove ▁ markers
+            text = raw.replace("▁", " ").strip()
+            return text
+        return text
 
     # ── Transformers backend (dev only) ─────────────────────────
 

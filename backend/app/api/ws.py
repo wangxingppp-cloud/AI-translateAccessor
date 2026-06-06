@@ -304,11 +304,26 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
             if asr_result.text:
                 sessions.record_sentence(session_id)
 
-                # NMT fast translation
-                nmt_engine = get_nmt_engine()
-                translation = await nmt_engine.translate(asr_result.text)
-                translated_text = translation.text
-                nmt_latency = translation.latency_ms
+                # Translation: LLM if enabled, else NMT
+                glossary = [t.model_dump() for t in session.config.glossary_terms] if session else []
+                llm_cfg = _session_llm_configs.get(session_id)
+                if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                    from ..engines.correction.corrector import LLMCorrector
+                    corrector = LLMCorrector(llm_cfg)
+                    # Use LLM for full translation (not just correction)
+                    prompt = f"""Translate the following English to Chinese.
+
+English: {asr_result.text}
+
+Chinese:"""
+                    result = await corrector._call_llm(prompt)
+                    translated_text = result.strip() or asr_result.text
+                    nmt_latency = 0
+                else:
+                    nmt_engine = get_nmt_engine()
+                    translation = await nmt_engine.translate(asr_result.text)
+                    translated_text = translation.text
+                    nmt_latency = translation.latency_ms
 
                 # Store context for future LLM correction
                 seq_id = str(uuid.uuid4())
