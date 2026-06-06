@@ -366,6 +366,8 @@ body {
 .lang-pair { display: flex; align-items: center; gap: 8px; }
 .lang-badge { padding: 4px 12px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 13px; background: var(--color-bg); }
 .lang-arrow { color: var(--color-text-muted); }
+.lang-select-row { display: flex; align-items: center; gap: 8px; }
+.lang-select-row .settings-select { flex: 1; }
 .test-row { display: flex; align-items: center; gap: 10px; }
 .test-btn { padding: 6px 16px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg); color: var(--color-text); font-size: 12px; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
 .test-btn:hover:not(:disabled) { border-color: var(--color-primary); }
