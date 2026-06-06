@@ -17,6 +17,11 @@ export interface ElectronAPI {
     onSystemAudio: (callback: (chunk: ArrayBuffer) => void) => () => void;
     onSystemAudioError: (callback: (message: string) => void) => () => void;
   };
+  backend: {
+    getPort: () => Promise<number | null>;
+    onReady: (callback: (port: number) => void) => void;
+    onError: (callback: (msg: string) => void) => void;
+  };
 }
 
 export interface SystemAudioDeviceInfo {
