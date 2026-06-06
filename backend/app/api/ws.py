@@ -28,6 +28,7 @@ from ..engines.translation.nmt_engine import get_nmt_engine
 from ..engines.translation.context_manager import TranslationContext
 from ..engines.correction.corrector import LLMCorrector, LLMConfig
 from ..engines.asr.cloud_asr import AsrEngineConfig, create_cloud_asr, StreamingASR
+from ..engines.asr.audio_capture import get_audio_capture
 
 router = APIRouter()
 
@@ -38,6 +39,7 @@ _session_contexts: dict[str, TranslationContext] = {}
 _session_llm_configs: dict[str, LLMConfig] = {}
 _session_cloud_asr: dict[str, StreamingASR] = {}
 _session_asr_configs: dict[str, AsrEngineConfig] = {}
+_session_sys_queues: dict[str, asyncio.Queue] = {}
 
 
 def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
@@ -62,6 +64,10 @@ def _remove_handler(session_id: str) -> None:
     _session_llm_configs.pop(session_id, None)
     _session_cloud_asr.pop(session_id, None)
     _session_asr_configs.pop(session_id, None)
+    if session_id in _session_sys_queues:
+        _session_sys_queues.pop(session_id, None)
+        try: get_audio_capture().stop()
+        except: pass
 
 
 async def _run_correction(
@@ -84,15 +90,18 @@ async def _run_correction(
         result = await corrector.correct(original, draft, context, glossary_terms=glossary)
 
         if result.corrected and result.corrected != draft:
-            await ws.send_json(
-                SubtitleCorrected(
-                    sequence_id=seq_id,
-                    corrected_text=result.corrected,
-                    diff=result.diff_segments,
-                    latency_ms=result.latency_ms,
-                    timestamp=time.time(),
-                ).model_dump()
-            )
+            try:
+                await ws.send_json(
+                    SubtitleCorrected(
+                        sequence_id=seq_id,
+                        corrected_text=result.corrected,
+                        diff=result.diff_segments,
+                        latency_ms=result.latency_ms,
+                        timestamp=time.time(),
+                    ).model_dump()
+                )
+            except Exception:
+                pass  # WebSocket may have closed
     except Exception as e:
         logger.warning(f"LLM correction failed [{session_id}]: {e}")
 
@@ -150,6 +159,21 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
         base_url=llm_raw.get("baseUrl", ""),
         enabled=llm_raw.get("enabled", False),
     )
+
+    # Start system audio capture if audio_source is 'system'
+    if session_config.audio_source == 'system':
+        try:
+            capture = get_audio_capture()
+            q: asyncio.Queue = asyncio.Queue()
+            def _on_pcm(pcm):
+                q.put_nowait(pcm)
+                if q.qsize() % 50 == 1:
+                    logger.debug(f"[QUEUE] pushed {len(pcm)}B, size={q.qsize()}")
+            capture.start(_on_pcm)
+            _session_sys_queues[session_id] = q
+            logger.info(f"Session [{session_id}] system audio capture started")
+        except Exception as e:
+            logger.warning(f"System capture unavailable, using client audio: {e}")
 
     sessions.update_state(session_id, SessionState.LISTENING)
     await ws.send_json(
@@ -254,23 +278,22 @@ async def _process_control_message(session_id: str, ws: WebSocket, text: str) ->
 
 
 async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> None:
-    """Process audio chunk through ASR + NMT pipeline.
+    """Process audio chunk through ASR + NMT pipeline."""
+    _n = getattr(_process_audio_chunk, '_n', 0) + 1
+    _process_audio_chunk._n = _n
 
-    PCM bytes → float32 → VAD → ASR → NMT → subtitle_draft → client
-    """
     try:
         session = sessions.require(session_id)
     except KeyError:
-        await ws.send_json(
-            ErrorMessage(
-                code="NO_SESSION",
-                message="Send a 'start' control message before audio data",
-            ).model_dump()
-        )
+        if _n <= 3: logger.error("[AUDIO] NO SESSION")
         return
 
     if session.state != SessionState.LISTENING:
+        if _n <= 3: logger.warning(f"[AUDIO] Wrong state: {session.state}")
         return
+
+    if _n <= 5:
+        logger.info(f"[AUDIO] #{_n}: {len(data)}B, state={session.state}")
 
     sessions.record_audio_chunk(session_id)
 
@@ -311,8 +334,8 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                     from ..engines.correction.corrector import LLMCorrector
                     corrector = LLMCorrector(llm_cfg)
                     # Use LLM for full translation (not just correction)
-                    src = session.source_lang.upper() if session else 'EN'
-                    tgt = session.target_lang.upper() if session else 'ZH'
+                    src = session.config.source_lang.upper() if session and session.config else 'EN'
+                    tgt = session.config.target_lang.upper() if session and session.config else 'ZH'
                     prompt = f"""Translate the following {src} text to {tgt}.
 
 {src}: {asr_result.text}
@@ -338,7 +361,8 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                         timestamp=time.time(),
                     )
 
-                # Send draft to client (original + NMT translation)
+                # Send draft to client
+                logger.info(f"[SEND] subtitle_draft: \"{asr_result.text[:50]}\" → \"{translated_text[:50]}\"")
                 await ws.send_json(
                     SubtitleDraft(
                         sequence_id=seq_id,
@@ -368,7 +392,8 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                     )
 
     except Exception as e:
-        logger.error(f"ASR/NMT processing error [{session_id}]: {e}")
+        if "Cannot call" not in str(e):
+            logger.warning(f"Audio processing error [{session_id}]: {e}")
 
 
 # ── Main WebSocket endpoint ──────────────────────────────────────
@@ -414,13 +439,34 @@ async def translate_websocket(websocket: WebSocket):
     )
 
     try:
-        while True:
-            data = await websocket.receive()
+        sys_queue = _session_sys_queues.get(session_id)
 
-            if "text" in data:
-                await _process_control_message(session_id, websocket, data["text"])
-            elif "bytes" in data:
-                await _process_audio_chunk(session_id, websocket, data["bytes"])
+        while True:
+            # Read from queue AND WebSocket concurrently
+            if sys_queue:
+                # System capture: read audio from queue, then check control
+                try:
+                    pcm = await asyncio.wait_for(sys_queue.get(), timeout=0.5)
+                    _mq = getattr(_process_audio_chunk, '_n', 0)
+                    if _mq <= 3:
+                        logger.info(f"[MAIN] Got {len(pcm)}B from queue (total processed: {_mq})")
+                    await _process_audio_chunk(session_id, websocket, pcm)
+                except asyncio.TimeoutError:
+                    pass
+                try:
+                    data = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+                    if "text" in data:
+                        await _process_control_message(session_id, websocket, data["text"])
+                        sys_queue = _session_sys_queues.get(session_id)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                data = await websocket.receive()
+                if "text" in data:
+                    await _process_control_message(session_id, websocket, data["text"])
+                elif "bytes" in data:
+                    await _process_audio_chunk(session_id, websocket, data["bytes"])
+                sys_queue = _session_sys_queues.get(session_id)  # May have started capture
 
     except WebSocketDisconnect:
         logger.info(f"Session [{session_id}] disconnected")
