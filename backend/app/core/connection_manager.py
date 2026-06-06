@@ -38,9 +38,8 @@ class ConnectionManager:
         if ws:
             try:
                 await ws.send_json(data)
-            except Exception as e:
-                logger.warning(f"Failed to send to [{session_id}]: {e}")
-                self.disconnect(session_id)
+            except Exception:
+                pass  # Connection already closed, don't disconnect the session
 
     async def broadcast(self, data: dict) -> None:
         """Send a JSON message to all connected sessions."""
