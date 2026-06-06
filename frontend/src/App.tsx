@@ -1,8 +1,9 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import './App.css';
 import { useAudioCapture } from './hooks/useAudioCapture';
 import { AudioSourceSelector, AudioControls, AudioVisualizer } from './components/audio';
 import { SettingsPanel } from './components/settings';
+import { SubtitleList, type SubtitleEntry } from './components/subtitle';
 import { useSettingsStore } from './stores/settingsStore';
 import { WebSocketClient } from './services/websocket-client';
 import type { AudioSource } from './types/audio';
@@ -15,7 +16,7 @@ function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [source, setSource] = useState<AudioSource>('microphone');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [subtitleLines, setSubtitleLines] = useState<Array<{ id: string; original: string; translated: string; isCorrected: boolean }>>([]);
+  const [subtitleLines, setSubtitleLines] = useState<SubtitleEntry[]>([]);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const llm = useSettingsStore((s) => s.llm);
@@ -39,7 +40,7 @@ function App() {
         setSubtitleLines((prev) =>
           prev.map((line) =>
             line.id === msg.sequence_id
-              ? { ...line, translated: msg.corrected_text, isCorrected: true }
+              ? { ...line, translated: msg.corrected_text, isCorrected: true, diff: msg.diff }
               : line
           )
         );
@@ -137,24 +138,12 @@ function App() {
               <button type="button" className="audio-error__dismiss" onClick={clearError}>✕</button>
             </div>
           )}
-          {subtitleLines.length > 0 ? (
-            <div className="subtitle-list">
-              {subtitleLines.map((line) => (
-                <div key={line.id} className={`subtitle-line ${line.isCorrected ? 'subtitle-line--corrected' : ''}`}>
-                  <div className="subtitle-line__original">{line.original}</div>
-                  <div className="subtitle-line__translated">{line.translated}</div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="subtitle-placeholder">
-              <p className="subtitle-hint">
-                {isTranslating
-                  ? source === 'system' ? '🔊 正在捕获系统音频...' : '🎤 正在从麦克风录音...'
-                  : '选择音频源并开始翻译，字幕将实时显示在此区域'}
-              </p>
-            </div>
-          )}
+          <SubtitleList
+            entries={subtitleLines}
+            placeholder={isTranslating
+              ? source === 'system' ? '🔊 正在捕获系统音频...' : '🎤 正在从麦克风录音...'
+              : '选择音频源并开始翻译，字幕将实时显示在此区域'}
+          />
         </div>
 
         {/* Control Bar */}
