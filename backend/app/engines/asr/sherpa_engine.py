@@ -62,24 +62,22 @@ class SherpaASREngine:
         tokens  = self._find_file(model_dir, "tokens", ".txt")
 
         if encoder and decoder and tokens:
-            kwargs = dict(
-                nn_model=encoder,
+            common = dict(
                 tokens=tokens,
                 sample_rate=self._sample_rate,
                 feature_dim=settings.asr_feature_dim,
-                decoding_method="greedy_search",
-                num_active_paths=4,
+                num_threads=4,
             )
             if joiner:
-                # Zipformer transducer model (English streaming)
-                self._recognizer = sherpa_onnx.OnlineRecognizer(
-                    decoder=decoder, joiner=joiner, **kwargs
+                # Zipformer transducer (English streaming)
+                self._recognizer = sherpa_onnx.OnlineRecognizer.from_transducer(
+                    encoder=encoder, decoder=decoder, joiner=joiner, **common
                 )
                 logger.info(f"ASR: streaming transducer ({model_dir.name})")
             else:
-                # Paraformer model (Chinese streaming)
-                self._recognizer = sherpa_onnx.OnlineRecognizer(
-                    paraformer=decoder, **kwargs
+                # Paraformer (Chinese streaming)
+                self._recognizer = sherpa_onnx.OnlineRecognizer.from_paraformer(
+                    encoder=encoder, decoder=decoder, **common
                 )
                 logger.info(f"ASR: streaming paraformer ({model_dir.name})")
 
@@ -121,8 +119,8 @@ class SherpaASREngine:
             return ASRResult(text="", is_final=False)
 
         self._recognizer.decode_stream(stream)
-        text = stream.result.text.strip()
-        is_endpoint = stream.is_endpoint
+        text = self._recognizer.get_result(stream).strip()
+        is_endpoint = self._recognizer.is_endpoint(stream)
 
         if is_endpoint:
             self._recognizer.reset(stream)
@@ -157,9 +155,17 @@ class SherpaASREngine:
 
     @staticmethod
     def _find_file(model_dir: Path, stem: str, suffix: str) -> Optional[str]:
-        candidates = list(model_dir.glob(f"*{stem}*{suffix}"))
-        if not candidates:
-            candidates = [c for c in model_dir.glob(f"*{suffix}") if stem.lower() in c.name.lower()]
+        # Prefer: left-64 int8 > left-128 int8 > any int8 > any ONNX
+        for pattern in [
+            f"*{stem}*left-64*int8*{suffix}",
+            f"*{stem}*left-128*int8*{suffix}",
+            f"*{stem}*int8*{suffix}",
+            f"*{stem}*{suffix}",
+        ]:
+            candidates = list(model_dir.glob(pattern))
+            if candidates:
+                return str(candidates[0])
+        candidates = [c for c in model_dir.glob(f"*{suffix}") if stem.lower() in c.name.lower()]
         return str(candidates[0]) if candidates else None
 
 
