@@ -14,7 +14,7 @@ from .sherpa_engine import SherpaASREngine, ASRResult, get_asr_engine
 from .vad_processor import VadProcessor, get_vad_processor
 
 TARGET_RATE = 16000
-BATCH_INTERVAL = 1.5  # seconds between transcriptions
+BATCH_INTERVAL = 2.5  # seconds between transcriptions
 
 
 class StreamHandler:
@@ -42,27 +42,41 @@ class StreamHandler:
 
         if not has_speech:
             if self._speech_buffer and self._speech_duration >= 0.5:
-                result = self._engine.transcribe(np.concatenate(self._speech_buffer))
+                audio = np.concatenate(self._speech_buffer)
+                self._speech_buffer.clear()
+                self._speech_duration = 0.0
+                result = await asyncio.to_thread(self._engine.transcribe, audio)
+                # Note: silence flush doesn't need overlap (utterance ended)
                 if result.text and result.text != self._prev_text:
                     self._prev_text = result.text
                     logger.debug(f"ASR: \"{result.text[:60]}\"")
                     yield result
-            self._speech_buffer.clear()
             self._speech_duration = 0.0
             return
 
         self._speech_buffer.append(samples)
         self._speech_duration += len(samples) / TARGET_RATE
 
-        # Batch transcribe at interval
+        # Batch transcribe with overlap (preserves context across batches)
         if self._speech_duration >= BATCH_INTERVAL:
-            result = self._engine.transcribe(np.concatenate(self._speech_buffer))
+            audio = np.concatenate(self._speech_buffer)
+            # Keep last 400ms for next batch overlap
+            overlap_samples = int(TARGET_RATE * 0.4)
+            if len(audio) > overlap_samples:
+                overlap = audio[-overlap_samples:]
+            else:
+                overlap = np.array([], dtype=np.float32)
+            self._speech_buffer.clear()
+            self._speech_duration = 0.0
+            result = await asyncio.to_thread(self._engine.transcribe, audio)
+            # Prepend overlap to next batch
+            if len(overlap) > 0:
+                self._speech_buffer.append(overlap)
+                self._speech_duration = len(overlap) / TARGET_RATE
             if result.text and result.text != self._prev_text:
                 self._prev_text = result.text
                 logger.info(f"ASR: \"{result.text[:80]}\"")
                 yield result
-            self._speech_buffer.clear()
-            self._speech_duration = 0.0
 
     def has_pending_speech(self) -> bool:
         return len(self._speech_buffer) > 0

@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onMaximizedChange: function (callback) {
       ipcRenderer.on('window-maximized', function (_event, maximized) { callback(maximized); });
     },
+    isAlwaysOnTop: function () { return ipcRenderer.invoke('window:isAlwaysOnTop'); },
+    setAlwaysOnTop: function (onTop) { ipcRenderer.send('window:setAlwaysOnTop', onTop); },
   },
 
   // ── App info ───────────────────────────────────────────────
