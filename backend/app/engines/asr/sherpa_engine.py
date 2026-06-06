@@ -1,27 +1,12 @@
 """
-Sherpa-onnx Streaming ASR Engine.
+Sherpa-onnx ASR Engine — streaming (Paraformer/Zipformer) + offline (SenseVoice).
 
-Wraps sherpa_onnx.OnlineRecognizer for real-time speech recognition.
-Supports Paraformer (Chinese-optimized) and other transducer/CTC models.
+Auto-detects model type from available files:
+  - encoder/decoder ONNX → OnlineRecognizer (streaming Paraformer/Zipformer)
+  - model.onnx + tokens → OfflineRecognizer (SenseVoice, Whisper)
 
-Model preparation:
-  Pre-converted models are available at:
-  https://github.com/k2-fsa/sherpa-onnx/releases
-
-  For Chinese (Paraformer):
-    sherpa-onnx-paraformer-zh-small-2024-03-09.tar.bz2
-
-  For English:
-    sherpa-onnx-zipformer-en-2023-06-26.tar.bz2
-
-  Usage:
-    ASR_MODEL_PATH=/path/to/extracted/model
-
-The engine handles:
-  - Streaming waveform acceptance (accept_waveform)
-  - Incremental decoding (decode_stream)
-  - Endpoint detection (is_endpoint)
-  - Result retrieval and stream reset
+SenseVoice: zh, en, ja, ko, yue — ~200MB
+  Download: python scripts/download_model.py
 """
 import time
 from dataclasses import dataclass, field
@@ -37,20 +22,19 @@ from ...config import get_settings
 
 @dataclass
 class ASRResult:
-    """Single ASR recognition result."""
-    text: str                         # Recognized text (partial or final)
-    is_final: bool = False            # True if utterance has ended
-    confidence: float = 0.0           # Confidence score (0-1)
+    text: str
+    is_final: bool = False
+    confidence: float = 0.0
     timestamp: float = field(default_factory=time.time)
     tokens: list[str] = field(default_factory=list)
 
 
 class SherpaASREngine:
     """
-    Streaming ASR engine backed by sherpa-onnx.
+    Streaming + offline ASR engine backed by sherpa-onnx.
 
     One instance is shared across all WebSocket sessions.
-    Each session creates its own OnlineStream and feeds audio independently.
+    Each session creates its own stream and feeds audio independently.
     """
 
     def __init__(self) -> None:
@@ -61,119 +45,116 @@ class SherpaASREngine:
             model_dir = Path(settings.asr_model_path)
 
         if not model_dir.exists():
-            logger.warning(
-                f"ASR model not found at {model_dir}. "
-                f"Download from https://github.com/k2-fsa/sherpa-onnx/releases"
-            )
-            # Create a placeholder recognizer that returns empty results
+            logger.warning(f"ASR model not found at {model_dir}")
             self._recognizer = None
             self._sample_rate = 16000
+            self._mode = "none"
             return
 
-        # Determine the model type from available files
+        self._sample_rate = settings.asr_sample_rate
+        self._mode = "none"
+        self._recognizer = None  # OnlineRecognizer | OfflineRecognizer
+
+        # Try streaming first (Paraformer/Zipformer)
         encoder = self._find_file(model_dir, "encoder", ".onnx")
         decoder = self._find_file(model_dir, "decoder", ".onnx")
         tokens = self._find_file(model_dir, "tokens", ".txt")
 
-        if not encoder or not decoder or not tokens:
-            logger.error(f"ASR model files incomplete in {model_dir}")
-            self._recognizer = None
-            self._sample_rate = 16000
+        if encoder and decoder and tokens:
+            self._recognizer = sherpa_onnx.OnlineRecognizer(
+                nn_model=encoder,
+                paraformer=decoder,
+                tokens=tokens,
+                sample_rate=self._sample_rate,
+                feature_dim=settings.asr_feature_dim,
+                decoding_method="greedy_search",
+                num_active_paths=4,
+            )
+            self._mode = "streaming"
+            logger.info(f"ASR: streaming mode ({model_dir.name})")
             return
 
-        # Create the online recognizer
-        self._recognizer = sherpa_onnx.OnlineRecognizer(
-            nn_model=encoder,
-            paraformer=decoder,
-            tokens=tokens,
-            sample_rate=settings.asr_sample_rate,
-            feature_dim=settings.asr_feature_dim,
-            decoding_method="greedy_search",
-            num_active_paths=4,
-        )
+        # Try offline (SenseVoice, Whisper) — prefer INT8 quantized model
+        model = self._find_file(model_dir, "model.int8", ".onnx") or \
+                self._find_file(model_dir, "model", ".onnx")
+        if model and tokens:
+            self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=model,
+                tokens=tokens,
+            )
+            self._mode = "offline"
+            logger.info(f"ASR: offline mode ({model_dir.name})")
+            return
 
-        self._sample_rate = settings.asr_sample_rate
+        logger.error(f"ASR model files incomplete in {model_dir}")
+        self._recognizer = None
+        self._mode = "none"
 
-        logger.info(
-            f"ASR engine initialized: {model_dir.name} "
-            f"({self._sample_rate} Hz, feature_dim={settings.asr_feature_dim})"
-        )
+    # ── Streaming API (Paraformer/Zipformer) ────────────────────
 
     def create_stream(self) -> Optional[sherpa_onnx.OnlineStream]:
-        """Create a new recognition stream for a session."""
-        if self._recognizer is None:
+        if self._mode != "streaming" or self._recognizer is None:
             return None
         return self._recognizer.create_stream()
 
     def accept_waveform(
-        self,
-        stream: sherpa_onnx.OnlineStream,
-        samples: np.ndarray,
+        self, stream: sherpa_onnx.OnlineStream, samples: np.ndarray
     ) -> None:
-        """Feed audio samples to the recognition stream.
-
-        Args:
-            stream: The recognition stream created by create_stream().
-            samples: float32 numpy array, shape (num_samples,).
-        """
-        if self._recognizer is None:
+        if self._mode != "streaming" or self._recognizer is None:
             return
         stream.accept_waveform(self._sample_rate, samples.astype(np.float32))
 
     def decode(self, stream: sherpa_onnx.OnlineStream) -> ASRResult:
-        """Decode the current stream and return incremental result.
-
-        Returns the partial recognition result. The text may change
-        as more audio is fed — this is expected behavior for streaming ASR.
-        """
-        if self._recognizer is None:
+        if self._mode != "streaming" or self._recognizer is None:
             return ASRResult(text="", is_final=False)
 
         self._recognizer.decode_stream(stream)
-        text = stream.result.text
+        text = stream.result.text.strip()
         is_endpoint = stream.is_endpoint
 
-        # Reset stream after endpoint detected
         if is_endpoint:
             self._recognizer.reset(stream)
 
-        return ASRResult(
-            text=text.strip(),
-            is_final=is_endpoint,
-            timestamp=time.time(),
-        )
+        return ASRResult(text=text, is_final=is_endpoint, timestamp=time.time())
+
+    # ── Offline API (SenseVoice, Whisper) ───────────────────────
+
+    def transcribe(self, samples: np.ndarray) -> ASRResult:
+        """Transcribe accumulated speech audio (used with VAD)."""
+        if self._mode != "offline" or self._recognizer is None:
+            return ASRResult(text="", is_final=True)
+
+        if len(samples) < self._sample_rate * 0.3:  # Skip <300ms
+            return ASRResult(text="", is_final=True)
+
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(self._sample_rate, samples.astype(np.float32))
+        self._recognizer.decode_stream(stream)
+        text = stream.result.text.strip()
+
+        return ASRResult(text=text, is_final=True, timestamp=time.time())
+
+    # ── Common ─────────────────────────────────────────────────
 
     def is_ready(self) -> bool:
-        """Check if the engine is initialized with a valid model."""
-        return self._recognizer is not None
+        return self._recognizer is not None and self._mode != "none"
 
-    # ── Helpers ────────────────────────────────────────────────
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     @staticmethod
     def _find_file(model_dir: Path, stem: str, suffix: str) -> Optional[str]:
-        """Find a model file by name stem and suffix.
-
-        e.g. _find_file(model_dir, "encoder", ".onnx") finds
-        model_dir/encoder-xxx.onnx or model_dir/xxx-encoder.onnx.
-        """
         candidates = list(model_dir.glob(f"*{stem}*{suffix}"))
         if not candidates:
-            candidates = list(model_dir.glob(f"*{suffix}"))
-            candidates = [c for c in candidates if stem.lower() in c.name.lower()]
-
-        if candidates:
-            return str(candidates[0])
-
-        logger.warning(f"File not found: *{stem}*{suffix} in {model_dir}")
-        return None
+            candidates = [c for c in model_dir.glob(f"*{suffix}") if stem.lower() in c.name.lower()]
+        return str(candidates[0]) if candidates else None
 
 
-# Singleton shared across all sessions
 _engine: Optional[SherpaASREngine] = None
 
 
 def get_asr_engine() -> SherpaASREngine:
-    """Return (and lazily initialize) the shared ASR engine singleton."""
     global _engine
     if _engine is None:
         _engine = SherpaASREngine()
