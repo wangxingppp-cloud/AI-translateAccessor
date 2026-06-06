@@ -50,8 +50,11 @@ function App() {
     const ws = new WebSocketClient({ url });
     ws.onStateChange(setWsState);
     ws.onMessage((msg: ServerMessage) => {
+      console.log('[WS-IN]', msg.type, msg.type === 'subtitle_draft' ? (msg as any).original?.slice(0, 30) : '');
       if (msg.type === 'subtitle_draft') {
-        addEntry({ id: msg.sequence_id, original: msg.original, translated: msg.translated, isCorrected: false, timestamp: msg.timestamp });
+        const entry = { id: msg.sequence_id, original: msg.original, translated: msg.translated, isCorrected: false, timestamp: msg.timestamp };
+        addEntry(entry);
+        console.log('[WS-IN] addEntry done, total entries:', useSubtitleStore.getState().entries.length);
       } else if (msg.type === 'subtitle_corrected') {
         correctEntry(msg.sequence_id, msg.corrected_text, msg.diff ?? []);
       }

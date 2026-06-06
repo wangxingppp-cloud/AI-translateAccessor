@@ -23,51 +23,45 @@ from ..models.subtitle import (
     StatusMessage, ErrorMessage, SubtitleDraft, SubtitleFinal, SubtitleCorrected,
 )
 from ..models.glossary import Term
-from ..engines.asr.stream_handler import StreamHandler
 from ..engines.translation.nmt_engine import get_nmt_engine
 from ..engines.translation.context_manager import TranslationContext
 from ..engines.correction.corrector import LLMCorrector, LLMConfig
 from ..engines.asr.cloud_asr import AsrEngineConfig, create_cloud_asr, StreamingASR
 from ..engines.asr.audio_capture import get_audio_capture
+from ..engines.asr.ring_buffer import RingBuffer
+from ..engines.asr.mark_processor import MarkGenerator, Mark, MarkType
+from ..engines.asr.transcription_worker import TranscriptionWorker
 
 router = APIRouter()
 
-# ── Per-session ASR handlers ────────────────────────────────────
+# ── Per-session state ───────────────────────────────────────────
 
-_session_handlers: dict[str, StreamHandler] = {}
 _session_contexts: dict[str, TranslationContext] = {}
 _session_llm_configs: dict[str, LLMConfig] = {}
 _session_cloud_asr: dict[str, StreamingASR] = {}
 _session_asr_configs: dict[str, AsrEngineConfig] = {}
-_session_sys_queues: dict[str, asyncio.Queue] = {}
-
-
-def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
-    """Get or create a StreamHandler for a session."""
-    if session_id not in _session_handlers and create:
-        _session_handlers[session_id] = StreamHandler()  # NAudio now outputs 16kHz mono 16-bit directly
-    return _session_handlers.get(session_id)
+_session_systems: dict[str, tuple[RingBuffer, MarkGenerator, TranscriptionWorker]] = {}
 
 
 def _get_context(session_id: str, create: bool = False) -> TranslationContext | None:
-    """Get or create a TranslationContext for a session."""
     if session_id not in _session_contexts and create:
         _session_contexts[session_id] = TranslationContext()
     return _session_contexts.get(session_id)
 
 
-def _remove_handler(session_id: str) -> None:
-    handler = _session_handlers.pop(session_id, None)
-    if handler:
-        handler.reset()
+def _cleanup_session(session_id: str) -> None:
+    """Stop system capture, worker, generator, and remove session state."""
+    system = _session_systems.pop(session_id, None)
+    if system:
+        _, gen, worker = system
+        gen.stop()
+        worker.stop()
     _session_contexts.pop(session_id, None)
     _session_llm_configs.pop(session_id, None)
     _session_cloud_asr.pop(session_id, None)
     _session_asr_configs.pop(session_id, None)
-    if session_id in _session_sys_queues:
-        _session_sys_queues.pop(session_id, None)
-        try: get_audio_capture().stop()
-        except: pass
+    try: get_audio_capture().stop()
+    except: pass
 
 
 async def _run_correction(
@@ -85,8 +79,8 @@ async def _run_correction(
             return
 
         corrector = LLMCorrector(llm_config)
-        session = sessions.get(session_id)
-        glossary = [t.model_dump() for t in session.config.glossary_terms] if session else []
+        sess = sessions.get(session_id)
+        glossary = [t.model_dump() for t in sess.config.glossary_terms] if sess else []
         result = await corrector.correct(original, draft, context, glossary_terms=glossary)
 
         if result.corrected and result.corrected != draft:
@@ -129,8 +123,7 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
         )
         return
 
-    # Initialize local ASR handler and translation context
-    _get_handler(session_id, create=True)
+    # Initialize translation context
     _get_context(session_id, create=True)
 
     # Parse ASR config from frontend
@@ -163,17 +156,47 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
     # Start system audio capture if audio_source is 'system'
     if session_config.audio_source == 'system':
         try:
-            capture = get_audio_capture()
-            q: asyncio.Queue = asyncio.Queue()
-            def _on_pcm(pcm):
-                q.put_nowait(pcm)
-                if q.qsize() % 50 == 1:
-                    logger.debug(f"[QUEUE] pushed {len(pcm)}B, size={q.qsize()}")
-            capture.start(_on_pcm)
-            _session_sys_queues[session_id] = q
-            logger.info(f"Session [{session_id}] system audio capture started")
+            import numpy as np
+            from ..engines.asr.ring_buffer import RingBuffer
+            from ..engines.asr.mark_processor import MarkGenerator
+            from ..engines.asr.transcription_worker import TranscriptionWorker
+            ring = RingBuffer()
+            gen = MarkGenerator(ring)
+            async def _tx(original: str, duration: float):
+                logger.info(f"[TX] \"{original[:60]}\" ({duration:.1f}s)")
+                s = sessions.get(session_id)
+                glossary = [t.model_dump() for t in s.config.glossary_terms] if s else []
+                llm_cfg = _session_llm_configs.get(session_id)
+                if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                    from ..engines.correction.corrector import LLMCorrector
+                    try:
+                        corrector = LLMCorrector(llm_cfg)
+                        s = sessions.get(session_id)
+                        src_l = (s.config.source_lang if s else "EN").upper()
+                        tgt_l = (s.config.target_lang if s else "ZH").upper()
+                        prompt = f"Translate {src_l} to {tgt_l}:\n\n{original}\n\n{tgt_l}:"
+                        result = await corrector._call_llm(prompt)
+                        translated = result.strip() or original
+                    except Exception:
+                        translated = original
+                else:
+                    nmt = get_nmt_engine()
+                    t = await nmt.translate(original)
+                    translated = t.text
+                seq_id = str(uuid.uuid4())
+                ctx = _get_context(session_id)
+                if ctx and translated:
+                    ctx.add(source=original, target=translated, sequence_id=seq_id, timestamp=time.time())
+                await ws.send_json(SubtitleDraft(sequence_id=seq_id, original=original, translated=translated, is_sentence_end=True, timestamp=time.time()).model_dump())
+            worker = TranscriptionWorker(ring, gen.queue, _tx)
+            cap = get_audio_capture()
+            cap.start(lambda pcm: ring.write(np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0))
+            gen.start(); worker.start()
+            asyncio.create_task(gen.run()); asyncio.create_task(worker.run())
+            _session_systems[session_id] = (ring, gen, worker)
+            logger.info(f"Session [{session_id}] system capture started (RingBuffer+Worker)")
         except Exception as e:
-            logger.warning(f"System capture unavailable, using client audio: {e}")
+            logger.warning(f"System capture failed: {e}")
 
     sessions.update_state(session_id, SessionState.LISTENING)
     await ws.send_json(
@@ -200,31 +223,14 @@ async def _handle_resume(session_id: str, _ws: WebSocket, _payload: dict) -> Non
 
 
 async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
-    """Handle stop — flush ASR buffer and clean up."""
+    """Handle stop — drain remaining audio and clean up."""
     try:
-        # Flush any pending ASR results before ending
-        handler = _get_handler(session_id)
-        if handler:
-            if handler.has_pending_speech():
-                final_result = await handler.flush()
-                if final_result and final_result.text:
-                    await ws.send_json(
-                        SubtitleFinal(sequence_id=str(uuid.uuid4()),
-                            original=final_result.text, translated=final_result.text,
-                            confidence=final_result.confidence, timestamp=final_result.timestamp).model_dump()
-                    )
-            handler.reset()  # Reset VAD state for next session
-            final_result = await handler.flush()
-            if final_result and final_result.text:
-                await ws.send_json(
-                    SubtitleFinal(
-                        sequence_id=str(uuid.uuid4()),
-                        original=final_result.text,
-                        translated="",  # Will be filled by translation module
-                        confidence=final_result.confidence,
-                        timestamp=final_result.timestamp,
-                    ).model_dump()
-                )
+        # Drain ring buffer
+        system = _session_systems.get(session_id)
+        if system:
+            _, gen, _ = system
+            await gen.drain()
+            await asyncio.sleep(1.5)  # Let worker process drain
 
         session = sessions.get(session_id)
         if session:
@@ -239,7 +245,13 @@ async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
         if cloud_asr:
             try: await cloud_asr.close()
             except: pass
-        _remove_handler(session_id)
+        # Drain: flush remaining audio before cleanup
+        system = _session_systems.get(session_id)
+        if system:
+            _, gen, _ = system
+            await gen.drain()
+            await asyncio.sleep(1)  # Let worker process the drain mark
+        _cleanup_session(session_id)
         sessions.remove(session_id)
     except KeyError:
         pass
@@ -327,7 +339,14 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
             logger.warning(f"Cloud ASR error [{session_id}]: {e}")
         return
 
-    handler = _get_handler(session_id)
+    # Mic mode: not using ring buffer system
+    from ..engines.asr.stream_handler import StreamHandler
+    if session_id not in getattr(_process_audio_chunk, '_handlers', {}):
+        setattr(_process_audio_chunk, '_handlers', {})
+    handlers = getattr(_process_audio_chunk, '_handlers', {})
+    if session_id not in handlers:
+        handlers[session_id] = StreamHandler()
+    handler = handlers.get(session_id)
     if not handler:
         return
 
@@ -337,14 +356,15 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                 sessions.record_sentence(session_id)
 
                 # Translation: LLM if enabled, else NMT
-                glossary = [t.model_dump() for t in session.config.glossary_terms] if session else []
+                s = sessions.get(session_id)
+                glossary = [t.model_dump() for t in s.config.glossary_terms] if s else []
                 llm_cfg = _session_llm_configs.get(session_id)
                 if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
                     from ..engines.correction.corrector import LLMCorrector
                     corrector = LLMCorrector(llm_cfg)
                     # Use LLM for full translation (not just correction)
-                    src = session.config.source_lang.upper() if session and session.config else 'EN'
-                    tgt = session.config.target_lang.upper() if session and session.config else 'ZH'
+                    src = sessions.get(session_id).config.source_lang if session_id else "EN".upper() if session and session.config else 'EN'
+                    tgt = sessions.get(session_id).config.target_lang if session_id else "ZH".upper() if session and session.config else 'ZH'
                     prompt = f"""Translate the following {src} text to {tgt}.
 
 {src}: {asr_result.text}
@@ -449,32 +469,25 @@ async def translate_websocket(websocket: WebSocket):
     )
 
     try:
-        sys_queue = _session_sys_queues.get(session_id)
+        sys_active = _session_systems.get(session_id)
 
         while True:
-            # Read from queue AND WebSocket concurrently
-            if sys_queue:
-                pcm = await sys_queue.get()
+            if sys_active:
+                # RingBuffer mode: worker handles transcription, just poll WS
                 try:
-                    await _process_audio_chunk(session_id, websocket, pcm)
-                except Exception:
-                    break  # WS closed, stop processing
-                # Check WS control every 50th chunk
-                if getattr(_process_audio_chunk, '_n', 0) % 50 == 0:
-                    try:
-                        data = await asyncio.wait_for(websocket.receive(), timeout=0.05)
-                        if "text" in data:
-                            await _process_control_message(session_id, websocket, data["text"])
-                            sys_queue = _session_sys_queues.get(session_id)
-                    except (asyncio.TimeoutError, Exception):
-                        pass
+                    data = await asyncio.wait_for(websocket.receive(), timeout=1.0)
+                    if "text" in data:
+                        await _process_control_message(session_id, websocket, data["text"])
+                        sys_active = _session_systems.get(session_id)
+                except asyncio.TimeoutError:
+                    pass
             else:
                 data = await websocket.receive()
                 if "text" in data:
                     await _process_control_message(session_id, websocket, data["text"])
                 elif "bytes" in data:
                     await _process_audio_chunk(session_id, websocket, data["bytes"])
-                sys_queue = _session_sys_queues.get(session_id)  # May have started capture
+                sys_active = _session_systems.get(session_id)
 
     except WebSocketDisconnect:
         logger.info(f"Session [{session_id}] disconnected")
@@ -496,7 +509,13 @@ async def translate_websocket(websocket: WebSocket):
         if cloud_asr:
             try: await cloud_asr.close()
             except: pass
-        _remove_handler(session_id)
+        # Drain: flush remaining audio before cleanup
+        system = _session_systems.get(session_id)
+        if system:
+            _, gen, _ = system
+            await gen.drain()
+            await asyncio.sleep(1)  # Let worker process the drain mark
+        _cleanup_session(session_id)
         sessions.remove(session_id)
         manager.disconnect(session_id)
         elapsed = time.time() - now
