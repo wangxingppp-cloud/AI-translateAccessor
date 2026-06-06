@@ -7,6 +7,7 @@ Design principle for desktop packaging:
   - All filesystem paths resolve relative to the executable when bundled,
     or relative to the project root in dev mode.
 """
+import sys
 from functools import lru_cache
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,9 +35,14 @@ class Settings(BaseSettings):
 
     @property
     def resolved_data_dir(self) -> Path:
-        """Resolve the writable data directory."""
+        """Writable data directory — persists across app restarts."""
         if self.data_dir:
             return Path(self.data_dir)
+        # Packaged: user app data (survives updates & temp cleanup)
+        if getattr(sys, 'frozen', False):
+            import platformdirs
+            return Path(platformdirs.user_data_dir("ai-translate", "ai-translate"))
+        # Dev: project-relative
         return Path(__file__).resolve().parent.parent.parent / "data"
 
     # ── Models directory (read-only resources) ─────────────────
@@ -44,9 +50,12 @@ class Settings(BaseSettings):
 
     @property
     def resolved_models_dir(self) -> Path:
-        """Resolve the ASR models directory."""
+        """Read-only models directory — bundled with the app."""
         if self.models_dir:
             return Path(self.models_dir)
+        if getattr(sys, 'frozen', False):
+            # PyInstaller bundles extra data here
+            return Path(getattr(sys, '_MEIPASS', '.')) / "models"
         return Path(__file__).resolve().parent.parent.parent / "models"
 
     # ── ASR ───────────────────────────────────────────────────

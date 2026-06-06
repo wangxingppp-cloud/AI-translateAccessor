@@ -32,3 +32,4 @@ numpy>=1.26
 # Utilities
 python-dotenv>=1.0
 loguru>=0.7
+platformdirs>=4.0
