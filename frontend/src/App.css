@@ -218,6 +218,10 @@ body {
 .control-btn--start:hover {
   background: var(--color-primary-hover);
 }
+.control-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 .control-btn--stop {
   background: var(--color-danger);
@@ -327,6 +331,11 @@ body {
 .settings-panel__close { background: none; border: none; color: var(--color-text-muted); cursor: pointer; font-size: 16px; padding: 4px 8px; border-radius: 4px; }
 .settings-panel__close:hover { background: var(--color-border); color: var(--color-text); }
 .settings-panel__body { padding: 20px; display: flex; flex-direction: column; gap: 24px; }
+.settings-panel__footer { padding: 0 20px 20px; display: flex; flex-direction: column; gap: 16px; border-top: 1px solid var(--color-border); padding-top: 16px; }
+.settings-tabs { display: flex; gap: 0; }
+.settings-tab { padding: 8px 16px; border: none; border-bottom: 2px solid transparent; background: none; color: var(--color-text-muted); cursor: pointer; font-size: 13px; transition: all 0.15s; }
+.settings-tab--active { color: var(--color-primary); border-bottom-color: var(--color-primary); }
+.settings-tab:hover:not(.settings-tab--active) { color: var(--color-text); }
 .settings-section { display: flex; flex-direction: column; gap: 12px; }
 .settings-section__title { font-size: 14px; font-weight: 600; margin: 0; }
 .settings-section__desc { font-size: 12px; color: var(--color-text-muted); margin: 0; line-height: 1.5; }
@@ -348,6 +357,12 @@ body {
 .provider-card__name { font-size: 13px; font-weight: 600; color: var(--color-text); }
 .provider-card__desc { font-size: 11px; color: var(--color-text-muted); line-height: 1.4; }
 .provider-card__meta { font-size: 10px; color: var(--color-text-muted); opacity: 0.7; margin-top: 2px; }
+.provider-card__badge {
+  position: absolute; top: 4px; right: 6px;
+  font-size: 9px; padding: 1px 5px; border-radius: 3px;
+  background: var(--color-primary); color: #fff; font-weight: 600;
+}
+.provider-card { position: relative; }
 .lang-pair { display: flex; align-items: center; gap: 8px; }
 .lang-badge { padding: 4px 12px; border: 1px solid var(--color-border); border-radius: 4px; font-size: 13px; background: var(--color-bg); }
 .lang-arrow { color: var(--color-text-muted); }
