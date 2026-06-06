@@ -2,6 +2,7 @@
  * Glossary manager — create, view, delete terminology glossaries.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { X, Plus, Trash2, ArrowRight } from 'lucide-react';
 
 interface TermPair {
   source: string;
@@ -87,14 +88,17 @@ export function GlossaryManager({ open, onClose, backendPort }: GlossaryManagerP
       <div className="glossary-panel" onClick={(e) => e.stopPropagation()}>
         <div className="glossary-panel__header">
           <h2 className="history-panel__title">术语管理</h2>
-          <button type="button" className="history-panel__close" onClick={onClose}>✕</button>
+          <button type="button" className="history-panel__close" onClick={onClose} aria-label="关闭">
+            <X size={16} strokeWidth={2} />
+          </button>
         </div>
 
         <div className="glossary-panel__body">
           {/* Create button */}
           {!showCreate && !selected && (
             <button type="button" className="glossary-add-btn" onClick={() => setShowCreate(true)}>
-              + 新建术语表
+              <Plus size={16} strokeWidth={2} />
+              新建术语表
             </button>
           )}
 
@@ -105,13 +109,20 @@ export function GlossaryManager({ open, onClose, backendPort }: GlossaryManagerP
               {terms.map((t, i) => (
                 <div key={i} className="glossary-term-row">
                   <input type="text" className="settings-input" value={t.source} onChange={(e) => updateTerm(i, 'source', e.target.value)} placeholder="原文" />
-                  <span className="glossary-arrow">→</span>
+                  <ArrowRight size={14} strokeWidth={1.5} className="glossary-arrow" />
                   <input type="text" className="settings-input" value={t.target} onChange={(e) => updateTerm(i, 'target', e.target.value)} placeholder="译文" />
-                  {terms.length > 1 && <button type="button" className="glossary-term-del" onClick={() => removeTerm(i)}>✕</button>}
+                  {terms.length > 1 && (
+                    <button type="button" className="glossary-term-del" onClick={() => removeTerm(i)} aria-label="移除术语">
+                      <X size={14} strokeWidth={2} />
+                    </button>
+                  )}
                 </div>
               ))}
               <div className="glossary-create__actions">
-                <button type="button" className="test-btn" onClick={addTerm}>+ 添加术语</button>
+                <button type="button" className="test-btn" onClick={addTerm}>
+                  <Plus size={14} strokeWidth={2} />
+                  添加术语
+                </button>
                 <button type="button" className="control-btn control-btn--start" onClick={handleCreate} disabled={!name.trim()}>创建</button>
                 <button type="button" className="test-btn" onClick={() => setShowCreate(false)}>取消</button>
               </div>
@@ -125,13 +136,16 @@ export function GlossaryManager({ open, onClose, backendPort }: GlossaryManagerP
               <div className="glossary-detail__header">
                 <button type="button" className="history-back" onClick={() => setSelected(null)}>← 返回</button>
                 <h3>{selected.name}</h3>
-                <button type="button" className="glossary-delete-btn" onClick={() => handleDelete(selected.id)}>删除</button>
+                <button type="button" className="glossary-delete-btn" onClick={() => handleDelete(selected.id)}>
+                  <Trash2 size={11} strokeWidth={2} />
+                  删除
+                </button>
               </div>
               <div className="glossary-detail__terms">
                 {selected.terms.map((t, i) => (
                   <div key={i} className="glossary-term-item">
                     <span className="glossary-term-item__source">{t.source}</span>
-                    <span className="glossary-arrow">→</span>
+                    <ArrowRight size={12} strokeWidth={1.5} className="glossary-arrow" />
                     <span className="glossary-term-item__target">{t.target}</span>
                   </div>
                 ))}
