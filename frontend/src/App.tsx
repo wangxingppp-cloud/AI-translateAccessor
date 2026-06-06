@@ -52,9 +52,24 @@ function App() {
     return () => { ws.disconnect(); };
   }, [backendPort]);
 
-  // Audio capture
+  // Audio capture — buffer ~200ms chunks for low-latency streaming
+  const chunkBuf = useRef<ArrayBuffer[]>([]);
   const { state: audioState, startCapture, stopCapture, switchSource, error: audioError, clearError } = useAudioCapture({
-    onChunk: (chunk) => { wsRef.current?.sendAudioChunk(chunk); },
+    onChunk: (chunk) => {
+      chunkBuf.current.push(chunk);
+      // Send merged ~200ms (small chunks, backend handles buffering)
+      if (chunkBuf.current.length >= 3) {
+        const total = chunkBuf.current.reduce((s, c) => s + c.byteLength, 0);
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const c of chunkBuf.current) {
+          merged.set(new Uint8Array(c), off);
+          off += c.byteLength;
+        }
+        wsRef.current?.sendAudioChunk(merged.buffer);
+        chunkBuf.current = [];
+      }
+    },
   });
   const isTranslating = audioState === 'capturing';
 

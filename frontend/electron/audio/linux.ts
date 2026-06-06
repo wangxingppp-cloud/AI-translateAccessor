@@ -162,7 +162,7 @@ export class LinuxAudioCapturer implements SystemAudioCapturer {
     let stderr = '';
 
     this.process.stdout!.on('data', (chunk: Buffer) => {
-      this.onChunk?.(chunk);
+      try { this.onChunk?.(chunk); } catch { /* window destroyed */ }
     });
 
     this.process.stderr!.on('data', (data: Buffer) => {

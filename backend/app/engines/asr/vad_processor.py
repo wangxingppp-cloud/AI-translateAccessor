@@ -90,11 +90,10 @@ class VadProcessor:
 
         # Stage 1: Energy-based fast filter
         rms = np.sqrt(np.mean(s ** 2))
-        # Log first few chunks for debugging
-        self._total_checks = getattr(self, '_total_checks', 0) + 1
-        if self._total_checks <= 3 or self._total_checks % 50 == 0:
-            logger.info(f"VAD rms={rms:.6f} samples={len(s)}")
-        if rms < 0.0005:  # Very permissive — only block pure silence
+        self._n = getattr(self, '_n', 0) + 1
+        if self._n <= 5 or self._n % 30 == 0:
+            logger.info(f"VAD #{self._n}: rms={rms:.4f} speech={rms>=0.0005}")
+        if rms < 0.0005:  # Block only pure silence
             return False
 
         # Stage 2: Feed to VAD model for context accumulation
