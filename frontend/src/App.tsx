@@ -7,6 +7,7 @@ import { SubtitleList } from './components/subtitle';
 import { useSettingsStore } from './stores/settingsStore';
 import { useConnectionStore } from './stores/connectionStore';
 import { useSubtitleStore } from './stores/subtitleStore';
+import { HistoryPanel } from './components/history';
 import { WebSocketClient } from './services/websocket-client';
 import type { AudioSource } from './types/audio';
 import type { ServerMessage } from './types/ws-messages';
@@ -18,6 +19,7 @@ const api = win.electronAPI;
 function App() {
   const [source, setSource] = useState<AudioSource>('microphone');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const llm = useSettingsStore((s) => s.llm);
@@ -117,6 +119,7 @@ function App() {
           <div className="status-bar__right">
             <AudioVisualizer state={audioState} />
             <span className="status-lang">English → 中文</span>
+            <button type="button" className="settings-gear" onClick={() => setHistoryOpen(true)} title="翻译历史">📋</button>
             <button type="button" className="settings-gear" onClick={() => setSettingsOpen(true)} title="设置">⚙</button>
           </div>
         </div>
@@ -151,6 +154,7 @@ function App() {
       </main>
 
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <HistoryPanel open={historyOpen} onClose={() => setHistoryOpen(false)} backendPort={backendPort} />
     </div>
   );
 }

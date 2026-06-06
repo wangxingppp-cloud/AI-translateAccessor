@@ -65,6 +65,25 @@ async def delete_session(session_id: str,
     return {"status": "deleted"}
 
 
+# ── History — search ────────────────────────────────────────
+
+@router.get("/subtitles/search")
+async def search_subtitles(q: str = Query(..., min_length=1),
+                           limit: int = Query(50, ge=1, le=200),
+                           svc: HistoryService = Depends(_svc)):
+    results = await svc.search_subtitles(q, limit=limit)
+    return {
+        "query": q,
+        "results": [{
+            "id": r.id, "session_id": r.session_id,
+            "original_text": r.original_text,
+            "translated_text": r.translated_text,
+            "is_corrected": bool(r.is_corrected),
+            "created_at": r.created_at,
+        } for r in results]
+    }
+
+
 # ── Glossary (stub) ─────────────────────────────────────────
 
 @router.get("/glossaries")
