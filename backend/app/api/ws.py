@@ -79,7 +79,9 @@ async def _run_correction(
             return
 
         corrector = LLMCorrector(llm_config)
-        result = await corrector.correct(original, draft, context)
+        session = sessions.get(session_id)
+        glossary = [t.model_dump() for t in session.config.glossary_terms] if session else []
+        result = await corrector.correct(original, draft, context, glossary_terms=glossary)
 
         if result.corrected and result.corrected != draft:
             await ws.send_json(
