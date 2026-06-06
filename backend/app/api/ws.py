@@ -154,10 +154,34 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
     )
 
     # Start system audio capture if audio_source is 'system'
+    cloud_asr = _session_cloud_asr.get(session_id)
+
     if session_config.audio_source == 'system':
         try:
             import numpy as np
-            from ..engines.asr.ring_buffer import RingBuffer
+            # Cloud ASR path: feed PCM directly, no local SenseVoice
+            if cloud_asr:
+                async def _cloud_tx(text: str):
+                    s = sessions.get(session_id)
+                    nmt = get_nmt_engine()
+                    t = await nmt.translate(text)
+                    seq_id = str(uuid.uuid4())
+                    await ws.send_json(SubtitleDraft(sequence_id=seq_id, original=text, translated=t.text, is_sentence_end=True, timestamp=time.time()).model_dump())
+
+                def _on_cloud_pcm(pcm: bytes):
+                    async def _process():
+                        async for result in cloud_asr.process_chunk(pcm):
+                            if result.text:
+                                await _cloud_tx(result.text)
+                    asyncio.create_task(_process())
+
+                cap = get_audio_capture()
+                cap.start(_on_cloud_pcm)
+                _session_systems[session_id] = (None, None, None)  # placeholder for cleanup
+                logger.info(f"Session [{session_id}] system capture → cloud ASR ({asr_config.provider})")
+            else:
+                # Local ASR path: RingBuffer + MarkGenerator + TranscriptionWorker
+                from ..engines.asr.ring_buffer import RingBuffer
             from ..engines.asr.mark_processor import MarkGenerator
             from ..engines.asr.transcription_worker import TranscriptionWorker
             ring = RingBuffer()
