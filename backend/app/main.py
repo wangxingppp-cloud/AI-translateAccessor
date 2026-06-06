@@ -28,6 +28,8 @@ async def lifespan(app: FastAPI):
     """Application lifespan — startup and shutdown hooks."""
     settings = get_settings()
     setup_logger(settings.log_level)
+    from .db.database import init_db
+    await init_db()
     yield
 
 
