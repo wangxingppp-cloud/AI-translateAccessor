@@ -1,6 +1,7 @@
 /**
  * Audio capture controls — start / pause / stop.
  */
+import { Play, Square, Loader2 } from 'lucide-react';
 import type { AudioCaptureState } from '../../types/audio';
 
 interface AudioControlsProps {
@@ -22,7 +23,17 @@ export function AudioControls({ state, onStart, onStop }: AudioControlsProps) {
           onClick={onStart}
           disabled={isLoading}
         >
-          {isLoading ? '⏳ 请求权限...' : '▶ 开始翻译'}
+          {isLoading ? (
+            <>
+              <Loader2 size={16} strokeWidth={2.5} className="animate-spin" />
+              请求权限...
+            </>
+          ) : (
+            <>
+              <Play size={16} strokeWidth={2.5} />
+              开始翻译
+            </>
+          )}
         </button>
       ) : (
         <button
@@ -30,7 +41,8 @@ export function AudioControls({ state, onStart, onStop }: AudioControlsProps) {
           className="control-btn control-btn--stop"
           onClick={onStop}
         >
-          ⏹ 停止
+          <Square size={16} strokeWidth={2.5} />
+          停止
         </button>
       )}
     </div>

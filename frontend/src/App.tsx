@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { Settings, Clock, BookOpen, Pin, PinOff, AlertTriangle } from 'lucide-react';
 import './App.css';
 import { useAudioCapture } from './hooks/useAudioCapture';
 import { AudioSourceSelector, AudioControls, AudioVisualizer } from './components/audio';
@@ -109,10 +110,15 @@ function App() {
     }
   }, [isTranslating, stopCapture, startCapture, source, llm, asr, clearSubtitles]);
 
+  const connected = wsState === 'connected';
+  const connecting = wsState === 'connecting' || wsState === 'reconnecting';
+
   return (
     <div className="app-container">
       <header className="title-bar">
-        <div className="title-bar__drag-region"><span className="title-bar__title">AI 同声传译</span></div>
+        <div className="title-bar__drag-region">
+          <span className="title-bar__title">AI 同声传译</span>
+        </div>
         <div className="title-bar__controls">
           <button type="button" className="title-bar__btn" onClick={() => api?.window.minimize()} aria-label="最小化">─</button>
           <button type="button" className="title-bar__btn" onClick={() => api?.window.maximize()} aria-label="最大化">□</button>
@@ -122,30 +128,45 @@ function App() {
 
       <main className="main-content">
         <div className="status-bar">
-          <span className={`status-indicator ${wsState === 'connected' ? 'status-indicator--connected' : 'status-indicator--disconnected'}`}>
-            {wsState === 'connected' ? '🟢 已连接' : wsState === 'connecting' || wsState === 'reconnecting' ? '🟡 连接中...' : '⚫ 未连接'}
+          <span className={`status-indicator ${connected ? 'status-indicator--connected' : 'status-indicator--disconnected'}`}>
+            <span className="status-dot" />
+            {connected ? '已连接' : connecting ? '连接中...' : '未连接'}
           </span>
           <div className="status-bar__right">
             <AudioVisualizer state={audioState} />
             <span className="status-lang">{srcLang.toUpperCase()} → {tgtLang.toUpperCase()}</span>
-            <button type="button" className="settings-gear" onClick={() => setHistoryOpen(true)} title="翻译历史">📋</button>
-            <button type="button" className="settings-gear" onClick={() => { const api = (window as any).electronAPI; api?.window.setAlwaysOnTop(!onTop); setOnTop(!onTop); }} title={onTop ? '取消置顶' : '窗口置顶'}>{onTop ? '📌' : '📍'}</button>
-            <button type="button" className="settings-gear" onClick={() => setGlossaryOpen(true)} title="术语管理">📖</button>
-            <button type="button" className="settings-gear" onClick={() => setSettingsOpen(true)} title="设置">⚙</button>
+            <button type="button" className="toolbar-btn" onClick={() => setHistoryOpen(true)} title="翻译历史" aria-label="翻译历史">
+              <Clock size={15} strokeWidth={1.8} />
+            </button>
+            <button
+              type="button"
+              className={`toolbar-btn ${onTop ? 'toolbar-btn--active' : ''}`}
+              onClick={() => { const api = (window as any).electronAPI; api?.window.setAlwaysOnTop(!onTop); setOnTop(!onTop); }}
+              title={onTop ? '取消置顶' : '窗口置顶'}
+              aria-label={onTop ? '取消置顶' : '窗口置顶'}
+            >
+              {onTop ? <Pin size={15} strokeWidth={1.8} /> : <PinOff size={15} strokeWidth={1.8} />}
+            </button>
+            <button type="button" className="toolbar-btn" onClick={() => setGlossaryOpen(true)} title="术语管理" aria-label="术语管理">
+              <BookOpen size={15} strokeWidth={1.8} />
+            </button>
+            <button type="button" className="toolbar-btn" onClick={() => setSettingsOpen(true)} title="设置" aria-label="设置">
+              <Settings size={15} strokeWidth={1.8} />
+            </button>
           </div>
         </div>
 
         <div className="subtitle-area">
           {backendError && (
             <div className="audio-error-banner">
-              <span className="audio-error__icon">⚠️</span>
+              <span className="audio-error__icon"><AlertTriangle size={15} /></span>
               <span className="audio-error__message">后端错误: {backendError}</span>
               <button type="button" className="audio-error__dismiss" onClick={() => setBackendError(null)}>✕</button>
             </div>
           )}
           {audioError && (
             <div className="audio-error-banner">
-              <span className="audio-error__icon">⚠️</span>
+              <span className="audio-error__icon"><AlertTriangle size={15} /></span>
               <span className="audio-error__message">{audioError.message}</span>
               <button type="button" className="audio-error__dismiss" onClick={clearError}>✕</button>
             </div>
@@ -153,7 +174,7 @@ function App() {
           <SubtitleList
             entries={entries}
             placeholder={isTranslating
-              ? source === 'system' ? '🔊 正在捕获系统音频...' : '🎤 正在从麦克风录音...'
+              ? source === 'system' ? '正在捕获系统音频...' : '正在从麦克风录音...'
               : backendPort ? '选择音频源并开始翻译，字幕将实时显示在此区域' : '正在启动后端服务...'}
           />
         </div>

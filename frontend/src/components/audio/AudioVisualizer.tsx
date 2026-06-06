@@ -1,7 +1,5 @@
 /**
  * Minimal audio visualizer — shows activity indicator when capturing.
- *
- * Can be expanded later with waveform / FFT rendering.
  */
 import { useEffect, useRef } from 'react';
 import type { AudioCaptureState } from '../../types/audio';
@@ -33,21 +31,38 @@ export function AudioVisualizer({ state, level = 0 }: AudioVisualizerProps) {
       ctx.clearRect(0, 0, w, h);
 
       if (isActive && level > 0) {
-        // Simple bar level meter
-        const normalized = Math.min(level / 32768, 1) * 0.8;
-        const barHeight = h * normalized;
+        // Bar level meter with gradient
+        const normalized = Math.min(level / 32768, 1) * 0.85;
+        const barHeight = Math.max(h * normalized, 2);
 
-        ctx.fillStyle = '#6366f1';
-        ctx.fillRect(0, h - barHeight, w, barHeight);
+        const gradient = ctx.createLinearGradient(0, h, 0, h - barHeight);
+        gradient.addColorStop(0, 'rgba(0, 212, 255, 0.9)');
+        gradient.addColorStop(1, 'rgba(0, 255, 136, 0.9)');
+        ctx.fillStyle = gradient;
+
+        // Rounded top corners
+        const radius = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, h);
+        ctx.lineTo(0, h - barHeight + radius);
+        ctx.quadraticCurveTo(0, h - barHeight, radius, h - barHeight);
+        ctx.lineTo(w - radius, h - barHeight);
+        ctx.quadraticCurveTo(w, h - barHeight, w, h - barHeight + radius);
+        ctx.lineTo(w, h);
+        ctx.closePath();
+        ctx.fill();
       } else if (isActive) {
-        // Idle pulsing dot
-        ctx.fillStyle = '#22c55e';
+        // Pulsing dot
+        ctx.fillStyle = '#00FF88';
+        ctx.shadowColor = 'rgba(0, 255, 136, 0.6)';
+        ctx.shadowBlur = 4;
         ctx.beginPath();
         ctx.arc(w / 2, h / 2, 3, 0, Math.PI * 2);
         ctx.fill();
+        ctx.shadowBlur = 0;
       } else {
         // Inactive
-        ctx.fillStyle = '#8b8d97';
+        ctx.fillStyle = '#5C6068';
         ctx.beginPath();
         ctx.arc(w / 2, h / 2, 2, 0, Math.PI * 2);
         ctx.fill();
@@ -64,7 +79,7 @@ export function AudioVisualizer({ state, level = 0 }: AudioVisualizerProps) {
     <canvas
       ref={canvasRef}
       className="audio-visualizer"
-      width={40}
+      width={44}
       height={20}
     />
   );

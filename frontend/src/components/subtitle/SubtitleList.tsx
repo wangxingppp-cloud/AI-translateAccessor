@@ -7,6 +7,7 @@
  *   - Auto-scroll resumes when user scrolls back to bottom
  */
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { ArrowDown } from 'lucide-react';
 import { SubtitleLine } from './SubtitleLine';
 import type { DiffSegment } from '../../types/ws-messages';
 
@@ -16,6 +17,7 @@ export interface SubtitleEntry {
   translated: string;
   isCorrected: boolean;
   diff?: DiffSegment[];
+  timestamp?: number;
 }
 
 interface SubtitleListProps {
@@ -77,7 +79,8 @@ export function SubtitleList({ entries, placeholder }: SubtitleListProps) {
             setUserScrolledUp(false);
           }}
         >
-          ↓ 滚动到最新
+          <ArrowDown size={12} strokeWidth={2} />
+          滚动到最新
         </button>
       )}
     </div>

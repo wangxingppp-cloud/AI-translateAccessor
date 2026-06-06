@@ -2,6 +2,7 @@
  * Translation history panel — browse sessions + search subtitles.
  */
 import { useState, useEffect } from 'react';
+import { X, Search } from 'lucide-react';
 import type { SubtitleEntry } from '../subtitle';
 
 interface SessionInfo {
@@ -75,7 +76,9 @@ export function HistoryPanel({ open, onClose, backendPort }: HistoryPanelProps) 
       <div className="history-panel" onClick={(e) => e.stopPropagation()}>
         <div className="history-panel__header">
           <h2 className="history-panel__title">翻译历史</h2>
-          <button type="button" className="history-panel__close" onClick={onClose}>✕</button>
+          <button type="button" className="history-panel__close" onClick={onClose} aria-label="关闭">
+            <X size={16} strokeWidth={2} />
+          </button>
         </div>
 
         {/* Search */}
@@ -86,7 +89,10 @@ export function HistoryPanel({ open, onClose, backendPort }: HistoryPanelProps) 
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
             placeholder="搜索原文或译文..."
           />
-          <button type="button" className="test-btn" onClick={handleSearch}>搜索</button>
+          <button type="button" className="test-btn" onClick={handleSearch}>
+            <Search size={14} strokeWidth={2} />
+            搜索
+          </button>
         </div>
 
         <div className="history-panel__body">
@@ -124,7 +130,7 @@ export function HistoryPanel({ open, onClose, backendPort }: HistoryPanelProps) 
                     {new Date(s.started_at * 1000).toLocaleString()}
                     {' · '}{s.asr_provider}
                     {' · '}{s.total_sentences} 句
-                    {s.status === 'active' && ' · 🔴 进行中'}
+                    {s.status === 'active' && ' · 进行中'}
                   </div>
                 </div>
               ))}

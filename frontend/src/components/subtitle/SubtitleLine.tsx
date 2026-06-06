@@ -26,7 +26,7 @@ export function SubtitleLine({ original, translated, isCorrected, diff }: Subtit
   }, [isCorrected, translated]);
 
   return (
-    <div className={`subtitle-line ${flash ? 'subtitle-line--flash' : ''}`}>
+    <div className={`subtitle-line ${isCorrected ? 'subtitle-line--corrected' : ''} ${flash ? 'subtitle-line--flash' : ''}`}>
       <div className="subtitle-line__original">{original}</div>
       <div className="subtitle-line__translated">
         {diff && diff.length > 0 ? (

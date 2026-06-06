@@ -2,6 +2,7 @@
  * Settings panel — tabbed layout (ASR + LLM) with Apply/Cancel.
  */
 import { useState } from 'react';
+import { X } from 'lucide-react';
 import { AsrSettings } from './AsrSettings';
 import { ModelSettings } from './ModelSettings';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -48,7 +49,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             <button type="button" className={`settings-tab ${tab === 'asr' ? 'settings-tab--active' : ''}`} onClick={() => setTab('asr')}>语音识别 (ASR)</button>
             <button type="button" className={`settings-tab ${tab === 'llm' ? 'settings-tab--active' : ''}`} onClick={() => setTab('llm')}>LLM 翻译修正</button>
           </div>
-          <button type="button" className="settings-panel__close" onClick={onClose} aria-label="关闭">✕</button>
+          <button type="button" className="settings-panel__close" onClick={onClose} aria-label="关闭">
+            <X size={16} strokeWidth={2} />
+          </button>
         </div>
 
         <div className="settings-panel__body">

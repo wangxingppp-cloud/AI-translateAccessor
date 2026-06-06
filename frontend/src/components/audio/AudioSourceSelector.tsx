@@ -1,6 +1,7 @@
 /**
  * Audio source selector — microphone or system audio.
  */
+import { Mic, Volume2 } from 'lucide-react';
 import type { AudioSource } from '../../types/audio';
 
 interface AudioSourceSelectorProps {
@@ -25,8 +26,8 @@ export function AudioSourceSelector({
           disabled={disabled}
           title="使用麦克风采集现场语音"
         >
-          <span className="source-icon">🎤</span>
-          <span className="source-label">麦克风</span>
+          <Mic size={14} strokeWidth={2} />
+          <span>麦克风</span>
         </button>
         <button
           type="button"
@@ -35,8 +36,8 @@ export function AudioSourceSelector({
           disabled={disabled}
           title="捕获系统音频输出（播放中的视频/会议声音）"
         >
-          <span className="source-icon">🔊</span>
-          <span className="source-label">系统音频</span>
+          <Volume2 size={14} strokeWidth={2} />
+          <span>系统音频</span>
         </button>
       </div>
     </div>
