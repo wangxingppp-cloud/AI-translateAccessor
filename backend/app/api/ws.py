@@ -6,9 +6,11 @@ The /ws/translate endpoint is the main pipeline for real-time translation:
   - Server sends subtitle JSON (draft → corrected → final) + status + errors
 
 Pipeline:  PCM bytes → float32 → VAD → ASR → NMT → subtitle_draft → client
+                                                  └→ LLM correct → subtitle_corrected (async)
 
 Protocol frames are defined in models/subtitle.py and models/session.py.
 """
+import asyncio
 import json
 import time
 import uuid
@@ -18,12 +20,13 @@ from loguru import logger
 from ..core.connection_manager import manager
 from ..core.session_manager import sessions, SessionState, SessionConfig
 from ..models.subtitle import (
-    StatusMessage, ErrorMessage, SubtitleDraft, SubtitleFinal,
+    StatusMessage, ErrorMessage, SubtitleDraft, SubtitleFinal, SubtitleCorrected,
 )
 from ..models.glossary import Term
 from ..engines.asr.stream_handler import StreamHandler
 from ..engines.translation.nmt_engine import get_nmt_engine
 from ..engines.translation.context_manager import TranslationContext
+from ..engines.correction.corrector import LLMCorrector, LLMConfig
 
 router = APIRouter()
 
@@ -31,6 +34,7 @@ router = APIRouter()
 
 _session_handlers: dict[str, StreamHandler] = {}
 _session_contexts: dict[str, TranslationContext] = {}
+_session_llm_configs: dict[str, LLMConfig] = {}
 
 
 def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
@@ -52,6 +56,38 @@ def _remove_handler(session_id: str) -> None:
     if handler:
         handler.reset()
     _session_contexts.pop(session_id, None)
+    _session_llm_configs.pop(session_id, None)
+
+
+async def _run_correction(
+    ws: WebSocket,
+    session_id: str,
+    original: str,
+    draft: str,
+    seq_id: str,
+    context: list[tuple[str, str]],
+) -> None:
+    """Run LLM correction in background and send result back."""
+    try:
+        llm_config = _session_llm_configs.get(session_id)
+        if not llm_config:
+            return
+
+        corrector = LLMCorrector(llm_config)
+        result = await corrector.correct(original, draft, context)
+
+        if result.corrected and result.corrected != draft:
+            await ws.send_json(
+                SubtitleCorrected(
+                    sequence_id=seq_id,
+                    corrected_text=result.corrected,
+                    diff=result.diff_segments,
+                    latency_ms=result.latency_ms,
+                    timestamp=time.time(),
+                ).model_dump()
+            )
+    except Exception as e:
+        logger.warning(f"LLM correction failed [{session_id}]: {e}")
 
 
 # ── Control message handlers ────────────────────────────────────
@@ -80,6 +116,16 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
     # Initialize ASR handler and translation context
     _get_handler(session_id, create=True)
     _get_context(session_id, create=True)
+
+    # Parse LLM config from frontend
+    llm_raw = config.get("llm", {})
+    _session_llm_configs[session_id] = LLMConfig(
+        provider=llm_raw.get("provider", "openai"),
+        api_key=llm_raw.get("apiKey", ""),
+        model=llm_raw.get("model", "gpt-4o-mini"),
+        base_url=llm_raw.get("baseUrl", ""),
+        enabled=llm_raw.get("enabled", False),
+    )
 
     sessions.update_state(session_id, SessionState.LISTENING)
     await ws.send_json(
@@ -238,6 +284,22 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                         timestamp=asr_result.timestamp,
                     ).model_dump()
                 )
+
+                # Async LLM correction (fire and forget)
+                llm_config = _session_llm_configs.get(session_id)
+                if llm_config and llm_config.enabled and llm_config.api_key:
+                    ctx = _get_context(session_id)
+                    context_pairs = [(e.source, e.target) for e in (ctx.get_recent(4) if ctx else [])]
+                    asyncio.create_task(
+                        _run_correction(
+                            ws=ws,
+                            session_id=session_id,
+                            original=asr_result.text,
+                            draft=translated_text,
+                            seq_id=seq_id,
+                            context=context_pairs,
+                        )
+                    )
 
     except Exception as e:
         logger.error(f"ASR/NMT processing error [{session_id}]: {e}")
