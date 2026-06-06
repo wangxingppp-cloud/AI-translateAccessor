@@ -16,6 +16,13 @@ export interface StartMessage {
     audio_source?: 'microphone' | 'system';
     enable_correction?: boolean;
     glossary?: TermDef[];
+    llm?: {
+      provider: string;
+      apiKey: string;
+      model: string;
+      baseUrl: string;
+      enabled: boolean;
+    };
   };
 }
 
