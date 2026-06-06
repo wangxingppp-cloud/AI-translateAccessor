@@ -2,6 +2,7 @@
  * Settings panel — modal overlay for application configuration.
  */
 import { ModelSettings } from './ModelSettings';
+import { AsrSettings } from './AsrSettings';
 
 interface SettingsPanelProps {
   open: boolean;
@@ -19,6 +20,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           <button type="button" className="settings-panel__close" onClick={onClose} aria-label="关闭">✕</button>
         </div>
         <div className="settings-panel__body">
+          <AsrSettings />
           <ModelSettings />
           <div className="settings-section">
             <h3 className="settings-section__title">语言</h3>
