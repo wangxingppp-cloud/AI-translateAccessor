@@ -40,7 +40,7 @@ _session_llm_configs: dict[str, LLMConfig] = {}
 def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
     """Get or create a StreamHandler for a session."""
     if session_id not in _session_handlers and create:
-        _session_handlers[session_id] = StreamHandler()
+        _session_handlers[session_id] = StreamHandler()  # NAudio now outputs 16kHz mono 16-bit directly
     return _session_handlers.get(session_id)
 
 
