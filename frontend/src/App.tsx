@@ -3,94 +3,71 @@ import './App.css';
 import { useAudioCapture } from './hooks/useAudioCapture';
 import { AudioSourceSelector, AudioControls, AudioVisualizer } from './components/audio';
 import { SettingsPanel } from './components/settings';
-import { SubtitleList, type SubtitleEntry } from './components/subtitle';
+import { SubtitleList } from './components/subtitle';
 import { useSettingsStore } from './stores/settingsStore';
+import { useConnectionStore } from './stores/connectionStore';
+import { useSubtitleStore } from './stores/subtitleStore';
 import { WebSocketClient } from './services/websocket-client';
 import type { AudioSource } from './types/audio';
-import type { ConnectionState, ServerMessage } from './types/ws-messages';
+import type { ServerMessage } from './types/ws-messages';
 
 const DEFAULT_WS_PORT = 8000;
-const win = window as { electronAPI?: { window: { minimize: () => void; maximize: () => void; close: () => void }; backend?: { onReady: (cb: (p: number) => void) => void; onError: (cb: (m: string) => void) => void } } };
+const win = window as { electronAPI?: { window: { minimize: () => void; maximize: () => void; close: () => void }; backend?: { getPort: () => Promise<number | null>; onReady: (cb: (p: number) => void) => void; onError: (cb: (m: string) => void) => void } } };
 const api = win.electronAPI;
 
 function App() {
-  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
-  const [wsPort, setWsPort] = useState<number | null>(null);
-  const [backendError, setBackendError] = useState<string | null>(null);
   const [source, setSource] = useState<AudioSource>('microphone');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [subtitleLines, setSubtitleLines] = useState<SubtitleEntry[]>([]);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const llm = useSettingsStore((s) => s.llm);
+  const { wsState, backendPort, backendError, setWsState, setBackendPort, setBackendError } = useConnectionStore();
+  const { entries, addEntry, correctEntry, clear: clearSubtitles } = useSubtitleStore();
 
-  // Discover backend port from Electron (already started or soon)
+  // Discover backend port from Electron
   useEffect(() => {
     if (api?.backend) {
-      // Check if backend is already ready (port available before mount)
-      api.backend.getPort().then((port: number | null) => {
-        if (port) setWsPort(port);
-      });
-      // Listen for future readiness events
-      api.backend.onReady((port: number) => setWsPort(port));
-      api.backend.onError((msg: string) => setBackendError(msg));
+      api.backend.getPort().then((port) => { if (port) setBackendPort(port); });
+      api.backend.onReady((port) => setBackendPort(port));
+      api.backend.onError((msg) => setBackendError(msg));
     }
-    if (!api) setWsPort(DEFAULT_WS_PORT); // No Electron = dev mode
+    if (!api) setBackendPort(DEFAULT_WS_PORT);
   }, []);
 
   // Create WebSocket client when port is known
   useEffect(() => {
-    if (!wsPort) return;
-    const url = `ws://127.0.0.1:${wsPort}/ws/translate`;
+    if (!backendPort) return;
+    const url = `ws://127.0.0.1:${backendPort}/ws/translate`;
     const ws = new WebSocketClient({ url });
-    ws.onStateChange(setConnectionState);
+    ws.onStateChange(setWsState);
     ws.onMessage((msg: ServerMessage) => {
       if (msg.type === 'subtitle_draft') {
-        setSubtitleLines((prev) => {
-          const next = [...prev, {
-            id: msg.sequence_id, original: msg.original, translated: msg.translated, isCorrected: false,
-          }];
-          return next.slice(-20);
-        });
+        addEntry({ id: msg.sequence_id, original: msg.original, translated: msg.translated, isCorrected: false, timestamp: msg.timestamp });
       } else if (msg.type === 'subtitle_corrected') {
-        setSubtitleLines((prev) =>
-          prev.map((line) =>
-            line.id === msg.sequence_id
-              ? { ...line, translated: msg.corrected_text, isCorrected: true, diff: msg.diff }
-              : line
-          )
-        );
+        correctEntry(msg.sequence_id, msg.corrected_text, msg.diff ?? []);
       }
     });
     wsRef.current = ws;
     return () => { ws.disconnect(); };
-  }, [wsPort]);
+  }, [backendPort]);
 
-  const ws = wsRef.current;
-
-  // Audio capture — send chunks via WebSocket
-  const {
-    state: audioState, startCapture, stopCapture, switchSource, error: audioError, clearError,
-  } = useAudioCapture({
-    onChunk: (chunk) => { ws?.sendAudioChunk(chunk); },
+  // Audio capture
+  const { state: audioState, startCapture, stopCapture, switchSource, error: audioError, clearError } = useAudioCapture({
+    onChunk: (chunk) => { wsRef.current?.sendAudioChunk(chunk); },
   });
-
   const isTranslating = audioState === 'capturing';
 
-  const handleSourceChange = useCallback((newSource: AudioSource) => {
-    setSource(newSource);
-    if (isTranslating) switchSource(newSource);
+  const handleSourceChange = useCallback((s: AudioSource) => {
+    setSource(s); if (isTranslating) switchSource(s);
   }, [isTranslating, switchSource]);
 
-  const handleToggleTranslation = useCallback(async () => {
-    const client = wsRef.current;
-    if (!client) return;
-
+  const handleToggle = useCallback(async () => {
+    const client = wsRef.current; if (!client) return;
     if (isTranslating) {
       client.sendControl({ type: 'stop' });
       await stopCapture();
       client.disconnect();
-      setSubtitleLines([]);
+      clearSubtitles();
     } else {
       client.connect();
       setTimeout(() => {
@@ -106,7 +83,7 @@ function App() {
         startCapture(source);
       }, 500);
     }
-  }, [isTranslating, stopCapture, startCapture, source, llm]);
+  }, [isTranslating, stopCapture, startCapture, source, llm, clearSubtitles]);
 
   return (
     <div className="app-container">
@@ -121,8 +98,8 @@ function App() {
 
       <main className="main-content">
         <div className="status-bar">
-          <span className={`status-indicator ${connectionState === 'connected' ? 'status-indicator--connected' : 'status-indicator--disconnected'}`}>
-            {connectionState === 'connected' ? '🟢 已连接' : connectionState === 'connecting' || connectionState === 'reconnecting' ? '🟡 连接中...' : '⚫ 未连接'}
+          <span className={`status-indicator ${wsState === 'connected' ? 'status-indicator--connected' : 'status-indicator--disconnected'}`}>
+            {wsState === 'connected' ? '🟢 已连接' : wsState === 'connecting' || wsState === 'reconnecting' ? '🟡 连接中...' : '⚫ 未连接'}
           </span>
           <div className="status-bar__right">
             <AudioVisualizer state={audioState} />
@@ -147,16 +124,16 @@ function App() {
             </div>
           )}
           <SubtitleList
-            entries={subtitleLines}
+            entries={entries}
             placeholder={isTranslating
               ? source === 'system' ? '🔊 正在捕获系统音频...' : '🎤 正在从麦克风录音...'
-              : wsPort ? '选择音频源并开始翻译，字幕将实时显示在此区域' : '正在启动后端服务...'}
+              : backendPort ? '选择音频源并开始翻译，字幕将实时显示在此区域' : '正在启动后端服务...'}
           />
         </div>
 
         <div className="control-bar">
           <AudioSourceSelector value={source} onChange={handleSourceChange} disabled={isTranslating} />
-          <AudioControls state={audioState} onStart={handleToggleTranslation} onStop={handleToggleTranslation} />
+          <AudioControls state={audioState} onStart={handleToggle} onStop={handleToggle} />
         </div>
       </main>
 
