@@ -34,7 +34,7 @@ function App() {
     if (!api) setBackendPort(DEFAULT_WS_PORT);
   }, []);
 
-  // Create WebSocket client when port is known
+  // Auto-connect WebSocket when port is known (kept alive across sessions)
   useEffect(() => {
     if (!backendPort) return;
     const url = `ws://127.0.0.1:${backendPort}/ws/translate`;
@@ -48,6 +48,7 @@ function App() {
       }
     });
     wsRef.current = ws;
+    ws.connect();
     return () => { ws.disconnect(); };
   }, [backendPort]);
 
@@ -66,22 +67,17 @@ function App() {
     if (isTranslating) {
       client.sendControl({ type: 'stop' });
       await stopCapture();
-      client.disconnect();
       clearSubtitles();
     } else {
-      client.connect();
-      setTimeout(() => {
-        if (!wsRef.current) return;
-        wsRef.current.sendControl({
-          type: 'start',
-          config: {
-            source_lang: 'en', target_lang: 'zh', audio_source: source,
-            enable_correction: llm.enabled,
-            llm: { provider: llm.provider, apiKey: llm.apiKey, model: llm.model, baseUrl: llm.baseUrl, enabled: llm.enabled },
-          },
-        });
-        startCapture(source);
-      }, 500);
+      client.sendControl({
+        type: 'start',
+        config: {
+          source_lang: 'en', target_lang: 'zh', audio_source: source,
+          enable_correction: llm.enabled,
+          llm: { provider: llm.provider, apiKey: llm.apiKey, model: llm.model, baseUrl: llm.baseUrl, enabled: llm.enabled },
+        },
+      });
+      startCapture(source);
     }
   }, [isTranslating, stopCapture, startCapture, source, llm, clearSubtitles]);
 

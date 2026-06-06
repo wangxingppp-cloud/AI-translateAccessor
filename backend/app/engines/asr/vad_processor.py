@@ -76,32 +76,33 @@ class VadProcessor:
     def process(self, samples: np.ndarray) -> bool:
         """Classify a chunk of audio as speech or silence.
 
-        Args:
-            samples: float32 numpy array, shape (num_samples,).
-                     Expected sample rate: 16000 Hz.
+        Uses two-stage detection:
+          1. Energy check (fast, per-chunk) — rejects obvious silence
+          2. VAD feed (accumulates context for segment boundaries)
 
         Returns:
-            True if the chunk contains speech, False if silence.
+            True if the chunk likely contains speech, False if silence.
         """
-        if self._vad is None:
-            return True  # No VAD model — treat everything as speech
-
-        # VAD expects float32 samples at 16kHz
         if len(samples) == 0:
             return False
 
-        samples = samples.astype(np.float32)
-        self._vad.accept_waveform(samples)
+        s = samples.astype(np.float32)
 
-        # After feeding audio, check if speech is detected
-        while not self._vad.empty():
-            segment = self._vad.front()
-            self._vad.pop()
-            # Return True for any speech segment
-            if len(segment.samples) > 0:
-                return True
+        # Stage 1: Energy-based fast filter
+        rms = np.sqrt(np.mean(s ** 2))
+        # Log first few chunks for debugging
+        self._total_checks = getattr(self, '_total_checks', 0) + 1
+        if self._total_checks <= 3 or self._total_checks % 50 == 0:
+            logger.info(f"VAD rms={rms:.6f} samples={len(s)}")
+        if rms < 0.0005:  # Very permissive — only block pure silence
+            return False
 
-        return False
+        # Stage 2: Feed to VAD model for context accumulation
+        if self._vad is not None:
+            self._vad.accept_waveform(s)
+
+        # Energy above threshold → likely speech
+        return True
 
     def detect_endpoint(self, samples: np.ndarray) -> bool:
         """Check if this chunk marks the end of an utterance.

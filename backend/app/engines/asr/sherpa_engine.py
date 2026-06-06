@@ -55,23 +55,35 @@ class SherpaASREngine:
         self._mode = "none"
         self._recognizer = None  # OnlineRecognizer | OfflineRecognizer
 
-        # Try streaming first (Paraformer/Zipformer)
+        # Try streaming first (Zipformer transducer or Paraformer)
         encoder = self._find_file(model_dir, "encoder", ".onnx")
         decoder = self._find_file(model_dir, "decoder", ".onnx")
-        tokens = self._find_file(model_dir, "tokens", ".txt")
+        joiner  = self._find_file(model_dir, "joiner", ".onnx")
+        tokens  = self._find_file(model_dir, "tokens", ".txt")
 
         if encoder and decoder and tokens:
-            self._recognizer = sherpa_onnx.OnlineRecognizer(
+            kwargs = dict(
                 nn_model=encoder,
-                paraformer=decoder,
                 tokens=tokens,
                 sample_rate=self._sample_rate,
                 feature_dim=settings.asr_feature_dim,
                 decoding_method="greedy_search",
                 num_active_paths=4,
             )
+            if joiner:
+                # Zipformer transducer model (English streaming)
+                self._recognizer = sherpa_onnx.OnlineRecognizer(
+                    decoder=decoder, joiner=joiner, **kwargs
+                )
+                logger.info(f"ASR: streaming transducer ({model_dir.name})")
+            else:
+                # Paraformer model (Chinese streaming)
+                self._recognizer = sherpa_onnx.OnlineRecognizer(
+                    paraformer=decoder, **kwargs
+                )
+                logger.info(f"ASR: streaming paraformer ({model_dir.name})")
+
             self._mode = "streaming"
-            logger.info(f"ASR: streaming mode ({model_dir.name})")
             return
 
         # Try offline (SenseVoice, Whisper) — prefer INT8 quantized model

@@ -191,6 +191,9 @@ export class LinuxAudioCapturer implements SystemAudioCapturer {
 
   async stop(): Promise<void> {
     if (this.process) {
+      this.process.stdout?.removeAllListeners();
+      this.process.stderr?.removeAllListeners();
+      this.process.removeAllListeners();
       try { this.process.kill('SIGTERM'); } catch { /* ignore */ }
       this.process = null;
     }

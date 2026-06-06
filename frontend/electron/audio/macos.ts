@@ -274,6 +274,9 @@ export class MacOSAudioCapturer implements SystemAudioCapturer {
 
   async stop(): Promise<void> {
     if (this.process) {
+      this.process.stdout?.removeAllListeners();
+      this.process.stderr?.removeAllListeners();
+      this.process.removeAllListeners();
       this.process.kill('SIGTERM');
       this.process = null;
     }
