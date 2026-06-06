@@ -68,6 +68,9 @@ Rules:
 Previous context:
 {context}
 
+Glossary (use these translations):
+{glossary}
+
 Source (English): {original}
 Machine translation (draft): {draft}
 
@@ -82,6 +85,7 @@ Output ONLY the corrected Chinese translation. No explanations, no quotes, no pr
         original: str,
         draft: str,
         context: list[tuple[str, str]] | None = None,
+        glossary_terms: list[dict] | None = None,
     ) -> CorrectionResult:
         """Correct a machine translation using the configured LLM.
 
@@ -114,8 +118,10 @@ Output ONLY the corrected Chinese translation. No explanations, no quotes, no pr
 
         try:
             ctx_text = self._build_context(context)
+            glossary_text = self._build_glossary(glossary_terms)
             prompt = self.CORRECTION_PROMPT.format(
                 context=ctx_text or "(no previous context)",
+                glossary=glossary_text or "(no custom glossary)",
                 original=original,
                 draft=draft,
             )
@@ -212,6 +218,15 @@ Output ONLY the corrected Chinese translation. No explanations, no quotes, no pr
         return str(content)
 
     # ── Helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_glossary(terms: list[dict] | None) -> str:
+        if not terms:
+            return ""
+        return "\n".join(
+            f"  {t.get('source', '')} → {t.get('target', '')}"
+            for t in terms if t.get('source') and t.get('target')
+        )
 
     @staticmethod
     def _build_context(context: list[tuple[str, str]] | None) -> str:

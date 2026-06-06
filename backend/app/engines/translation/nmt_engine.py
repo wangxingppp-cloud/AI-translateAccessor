@@ -64,12 +64,14 @@ class NMTEngine:
         self._model = None            # transformers model (fallback)
         self._device = "cpu"
 
-    async def translate(self, text: str, source_lang: str = "en") -> NMTResult:
+    async def translate(self, text: str, source_lang: str = "en",
+                        glossary_terms: list[dict] | None = None) -> NMTResult:
         """Translate a single text segment.
 
         Args:
             text: Source text (English).
             source_lang: Source language code (default: "en").
+            glossary_terms: Optional list of {source, target} term pairs.
 
         Returns:
             NMTResult with translated text and metadata.
