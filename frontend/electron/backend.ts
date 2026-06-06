@@ -123,7 +123,10 @@ function findBackendCommand(): string {
   if (existsSync(prodExe)) return prodExe;
 
   // Development: find Python
-  const pythonCommands = ['python', 'python3', 'py'];
+  const pythonCommands = [
+    join(findBackendCwd(), 'venv', 'Scripts', 'python.exe'),
+    'python', 'python3', 'py',
+  ];
   for (const py of pythonCommands) {
     try {
       const { execSync } = require('child_process');
@@ -136,9 +139,9 @@ function findBackendCommand(): string {
 }
 
 function findBackendArgs(cmd: string): string[] {
-  // Production exe: no args needed
-  if (cmd.endsWith('.exe')) return [];
+  // Bundled backend .exe (PyInstaller): no args needed
+  if (cmd.includes('ai-translate-backend')) return [];
 
-  // Development: run via Python
+  // Python interpreter: run module
   return ['-m', 'app.main'];
 }

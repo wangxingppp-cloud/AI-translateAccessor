@@ -81,6 +81,12 @@ function registerWindowIPC() {
   ipcMain.handle('app:getVersion', () => app.getVersion());
   ipcMain.handle('app:getPlatform', () => process.platform);
 
+  // Always on top
+  ipcMain.handle('window:isAlwaysOnTop', () => mainWindow?.isAlwaysOnTop() ?? false);
+  ipcMain.on('window:setAlwaysOnTop', (_event, onTop: boolean) => {
+    mainWindow?.setAlwaysOnTop(onTop);
+  });
+
   // Backend port discovery
   ipcMain.handle('backend:getPort', () => getBackendPort());
   ipcMain.on('backend:onReady', (event) => {
