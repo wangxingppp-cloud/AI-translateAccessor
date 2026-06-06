@@ -40,3 +40,30 @@ class Subtitle(Base):
     position_ms = Column(Integer, default=0)
 
     session = relationship("Session", back_populates="subtitles")
+
+
+class Glossary(Base):
+    __tablename__ = "glossaries"
+
+    id = Column(String, primary_key=True, default=gen_id)
+    name = Column(String, nullable=False)
+    source_lang = Column(String, default="en")
+    target_lang = Column(String, default="zh")
+    created_at = Column(Float)
+    updated_at = Column(Float)
+
+    terms = relationship("GlossaryTerm", back_populates="glossary", cascade="all, delete-orphan")
+
+
+class GlossaryTerm(Base):
+    __tablename__ = "glossary_terms"
+
+    id = Column(String, primary_key=True, default=gen_id)
+    glossary_id = Column(String, ForeignKey("glossaries.id"), nullable=False)
+    source_term = Column(String, nullable=False)
+    target_term = Column(String, nullable=False)
+    category = Column(String, default="")
+    priority = Column(Integer, default=0)
+    created_at = Column(Float)
+
+    glossary = relationship("Glossary", back_populates="terms")

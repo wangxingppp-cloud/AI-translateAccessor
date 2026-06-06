@@ -84,8 +84,48 @@ async def search_subtitles(q: str = Query(..., min_length=1),
     }
 
 
-# ── Glossary (stub) ─────────────────────────────────────────
+# ── Glossary ────────────────────────────────────────────────
+
+@router.post("/glossaries")
+async def create_glossary(data: dict, svc: HistoryService = Depends(_svc)):
+    from ..services.glossary_service import GlossaryService
+    gsvc = GlossaryService(svc.db)
+    g = await gsvc.create(
+        name=data.get("name", "未命名"),
+        terms=data.get("terms", []),
+        source_lang=data.get("source_lang", "en"),
+        target_lang=data.get("target_lang", "zh"),
+    )
+    return {"id": g.id, "name": g.name, "created_at": g.created_at}
+
 
 @router.get("/glossaries")
-async def list_glossaries():
-    return {"glossaries": []}
+async def list_glossaries(svc: HistoryService = Depends(_svc)):
+    from ..services.glossary_service import GlossaryService
+    gsvc = GlossaryService(svc.db)
+    glossaries = await gsvc.list_all()
+    return {"glossaries": [{"id": g.id, "name": g.name, "source_lang": g.source_lang,
+            "target_lang": g.target_lang, "created_at": g.created_at} for g in glossaries]}
+
+
+@router.get("/glossaries/{glossary_id}")
+async def get_glossary(glossary_id: str, svc: HistoryService = Depends(_svc)):
+    from ..services.glossary_service import GlossaryService
+    gsvc = GlossaryService(svc.db)
+    data = await gsvc.get(glossary_id)
+    if not data:
+        return {"error": "not found"}, 404
+    g, terms = data["glossary"], data["terms"]
+    return {
+        "id": g.id, "name": g.name, "source_lang": g.source_lang, "target_lang": g.target_lang,
+        "terms": [{"id": t.id, "source": t.source_term, "target": t.target_term,
+                    "category": t.category, "priority": t.priority} for t in terms]
+    }
+
+
+@router.delete("/glossaries/{glossary_id}")
+async def delete_glossary(glossary_id: str, svc: HistoryService = Depends(_svc)):
+    from ..services.glossary_service import GlossaryService
+    gsvc = GlossaryService(svc.db)
+    await gsvc.delete(glossary_id)
+    return {"status": "deleted"}
