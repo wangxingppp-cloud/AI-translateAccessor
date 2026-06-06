@@ -22,6 +22,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [glossaryOpen, setGlossaryOpen] = useState(false);
+  const [onTop, setOnTop] = useState(false);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const llm = useSettingsStore((s) => s.llm);
@@ -39,6 +40,7 @@ function App() {
       api.backend.onError((msg) => setBackendError(msg));
     }
     if (!api) setBackendPort(DEFAULT_WS_PORT);
+    api?.window.isAlwaysOnTop().then(setOnTop);
   }, []);
 
   // Auto-connect WebSocket when port is known (kept alive across sessions)
@@ -124,6 +126,7 @@ function App() {
             <AudioVisualizer state={audioState} />
             <span className="status-lang">{srcLang.toUpperCase()} → {tgtLang.toUpperCase()}</span>
             <button type="button" className="settings-gear" onClick={() => setHistoryOpen(true)} title="翻译历史">📋</button>
+            <button type="button" className="settings-gear" onClick={() => { const api = (window as any).electronAPI; api?.window.setAlwaysOnTop(!onTop); setOnTop(!onTop); }} title={onTop ? '取消置顶' : '窗口置顶'}>{onTop ? '📌' : '📍'}</button>
             <button type="button" className="settings-gear" onClick={() => setGlossaryOpen(true)} title="术语管理">📖</button>
             <button type="button" className="settings-gear" onClick={() => setSettingsOpen(true)} title="设置">⚙</button>
           </div>

@@ -5,6 +5,8 @@ export interface ElectronAPI {
     close: () => void;
     isMaximized: () => Promise<boolean>;
     onMaximizedChange: (callback: (maximized: boolean) => void) => void;
+    isAlwaysOnTop: () => Promise<boolean>;
+    setAlwaysOnTop: (onTop: boolean) => void;
   };
   app: {
     getVersion: () => Promise<string>;
