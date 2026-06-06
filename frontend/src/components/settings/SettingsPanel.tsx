@@ -1,38 +1,57 @@
 /**
- * Settings panel — modal overlay for application configuration.
+ * Settings panel — tabbed layout (ASR + LLM) with Apply/Cancel.
  */
-import { ModelSettings } from './ModelSettings';
+import { useState } from 'react';
 import { AsrSettings } from './AsrSettings';
+import { ModelSettings } from './ModelSettings';
 
 interface SettingsPanelProps {
   open: boolean;
   onClose: () => void;
 }
 
+type Tab = 'asr' | 'llm';
+
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
+  const [tab, setTab] = useState<Tab>('asr');
+
   if (!open) return null;
 
   return (
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
         <div className="settings-panel__header">
-          <h2 className="settings-panel__title">设置</h2>
+          <div className="settings-tabs">
+            <button
+              type="button"
+              className={`settings-tab ${tab === 'asr' ? 'settings-tab--active' : ''}`}
+              onClick={() => setTab('asr')}
+            >
+              语音识别 (ASR)
+            </button>
+            <button
+              type="button"
+              className={`settings-tab ${tab === 'llm' ? 'settings-tab--active' : ''}`}
+              onClick={() => setTab('llm')}
+            >
+              LLM 翻译修正
+            </button>
+          </div>
           <button type="button" className="settings-panel__close" onClick={onClose} aria-label="关闭">✕</button>
         </div>
+
         <div className="settings-panel__body">
-          <AsrSettings />
-          <ModelSettings />
+          {tab === 'asr' ? <AsrSettings /> : <ModelSettings />}
+        </div>
+
+        <div className="settings-panel__footer">
           <div className="settings-section">
             <h3 className="settings-section__title">语言</h3>
-            <div className="settings-row">
-              <label className="settings-label">源语言 → 目标语言</label>
-              <div className="lang-pair">
-                <span className="lang-badge">English</span>
-                <span className="lang-arrow">→</span>
-                <span className="lang-badge">中文</span>
-              </div>
+            <div className="lang-pair">
+              <span className="lang-badge">English</span>
+              <span className="lang-arrow">→</span>
+              <span className="lang-badge">中文</span>
             </div>
-            <p className="settings-hint">更多语言支持将在后续版本中添加。</p>
           </div>
           <div className="settings-section">
             <h3 className="settings-section__title">关于</h3>
