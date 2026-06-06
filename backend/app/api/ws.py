@@ -311,11 +311,13 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                     from ..engines.correction.corrector import LLMCorrector
                     corrector = LLMCorrector(llm_cfg)
                     # Use LLM for full translation (not just correction)
-                    prompt = f"""Translate the following English to Chinese.
+                    src = session.source_lang.upper() if session else 'EN'
+                    tgt = session.target_lang.upper() if session else 'ZH'
+                    prompt = f"""Translate the following {src} text to {tgt}.
 
-English: {asr_result.text}
+{src}: {asr_result.text}
 
-Chinese:"""
+{tgt}:"""
                     result = await corrector._call_llm(prompt)
                     translated_text = result.strip() or asr_result.text
                     nmt_latency = 0
