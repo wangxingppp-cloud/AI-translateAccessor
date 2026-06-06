@@ -3,7 +3,6 @@ import './App.css';
 import type { ElectronAPI } from './types/electron';
 import { useAudioCapture } from './hooks/useAudioCapture';
 import { AudioSourceSelector, AudioControls, AudioVisualizer } from './components/audio';
-import { SettingsPanel } from './components/settings';
 import type { AudioSource } from './types/audio';
 import type { ConnectionState } from './types/ws-messages';
 
@@ -12,7 +11,6 @@ const api = (window as Window & { electronAPI?: ElectronAPI }).electronAPI;
 function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [source, setSource] = useState<AudioSource>('microphone');
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const {
     state: audioState,
@@ -68,14 +66,6 @@ function App() {
           <div className="status-bar__right">
             <AudioVisualizer state={audioState} />
             <span className="status-lang">English → 中文</span>
-            <button
-              type="button"
-              className="settings-gear"
-              onClick={() => setSettingsOpen(true)}
-              title="设置"
-            >
-              ⚙
-            </button>
           </div>
         </div>
 
@@ -113,9 +103,6 @@ function App() {
           />
         </div>
       </main>
-
-      {/* Settings Modal */}
-      <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }
