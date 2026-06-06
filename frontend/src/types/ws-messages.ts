@@ -23,6 +23,13 @@ export interface StartMessage {
       baseUrl: string;
       enabled: boolean;
     };
+    asr?: {
+      provider: string;
+      apiKey: string;
+      apiSecret: string;
+      appId: string;
+      baseUrl: string;
+    };
   };
 }
 
