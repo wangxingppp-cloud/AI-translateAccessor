@@ -5,7 +5,7 @@ The /ws/translate endpoint is the main pipeline for real-time translation:
   - Client sends binary PCM audio chunks + JSON control messages
   - Server sends subtitle JSON (draft → corrected → final) + status + errors
 
-Pipeline:  PCM bytes → float32 → VAD → ASR → subtitle_draft → client
+Pipeline:  PCM bytes → float32 → VAD → ASR → NMT → subtitle_draft → client
 
 Protocol frames are defined in models/subtitle.py and models/session.py.
 """
@@ -22,12 +22,15 @@ from ..models.subtitle import (
 )
 from ..models.glossary import Term
 from ..engines.asr.stream_handler import StreamHandler
+from ..engines.translation.nmt_engine import get_nmt_engine
+from ..engines.translation.context_manager import TranslationContext
 
 router = APIRouter()
 
 # ── Per-session ASR handlers ────────────────────────────────────
 
 _session_handlers: dict[str, StreamHandler] = {}
+_session_contexts: dict[str, TranslationContext] = {}
 
 
 def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
@@ -37,10 +40,18 @@ def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
     return _session_handlers.get(session_id)
 
 
+def _get_context(session_id: str, create: bool = False) -> TranslationContext | None:
+    """Get or create a TranslationContext for a session."""
+    if session_id not in _session_contexts and create:
+        _session_contexts[session_id] = TranslationContext()
+    return _session_contexts.get(session_id)
+
+
 def _remove_handler(session_id: str) -> None:
     handler = _session_handlers.pop(session_id, None)
     if handler:
         handler.reset()
+    _session_contexts.pop(session_id, None)
 
 
 # ── Control message handlers ────────────────────────────────────
@@ -66,8 +77,9 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
         )
         return
 
-    # Initialize ASR handler
+    # Initialize ASR handler and translation context
     _get_handler(session_id, create=True)
+    _get_context(session_id, create=True)
 
     sessions.update_state(session_id, SessionState.LISTENING)
     await ws.send_json(
@@ -168,9 +180,9 @@ async def _process_control_message(session_id: str, ws: WebSocket, text: str) ->
 
 
 async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> None:
-    """Process audio chunk through the ASR pipeline.
+    """Process audio chunk through ASR + NMT pipeline.
 
-    PCM bytes → float32 samples → VAD → ASR decode → subtitle_draft → client
+    PCM bytes → float32 → VAD → ASR → NMT → subtitle_draft → client
     """
     try:
         session = sessions.require(session_id)
@@ -193,22 +205,42 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
         return
 
     try:
-        async for result in handler.process_chunk(data):
-            if result.text:
+        async for asr_result in handler.process_chunk(data):
+            if asr_result.text:
                 sessions.record_sentence(session_id)
+
+                # NMT fast translation
+                nmt_engine = get_nmt_engine()
+                translation = await nmt_engine.translate(asr_result.text)
+                translated_text = translation.text
+                nmt_latency = translation.latency_ms
+
+                # Store context for future LLM correction
+                seq_id = str(uuid.uuid4())
+                ctx = _get_context(session_id)
+                if ctx and translated_text:
+                    ctx.add(
+                        source=asr_result.text,
+                        target=translated_text,
+                        sequence_id=seq_id,
+                        timestamp=time.time(),
+                    )
+
+                # Send draft to client (original + NMT translation)
                 await ws.send_json(
                     SubtitleDraft(
-                        sequence_id=str(uuid.uuid4()),
-                        original=result.text,
-                        translated=result.text,  # Placeholder — translation module fills this
-                        is_sentence_end=result.is_final,
-                        confidence=result.confidence,
-                        latency_ms=0,
-                        timestamp=result.timestamp,
+                        sequence_id=seq_id,
+                        original=asr_result.text,
+                        translated=translated_text,
+                        is_sentence_end=asr_result.is_final,
+                        confidence=asr_result.confidence,
+                        latency_ms=round(nmt_latency),
+                        timestamp=asr_result.timestamp,
                     ).model_dump()
                 )
+
     except Exception as e:
-        logger.error(f"ASR processing error [{session_id}]: {e}")
+        logger.error(f"ASR/NMT processing error [{session_id}]: {e}")
 
 
 # ── Main WebSocket endpoint ──────────────────────────────────────
