@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startBackend, stopBackend, setBackendCallbacks, getBackendPort } from './backend.js';
 
 // ESM-compatible __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -79,39 +80,65 @@ function registerWindowIPC() {
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
   ipcMain.handle('app:getPlatform', () => process.platform);
+
+  // Backend port discovery
+  ipcMain.handle('backend:getPort', () => getBackendPort());
+  ipcMain.on('backend:onReady', (event) => {
+    const handler = (port: number) => event.sender.send('backend:ready', port);
+    setBackendCallbacks(
+      handler,
+      (msg) => event.sender.send('backend:error', msg),
+    );
+  });
 }
 
 // ── App lifecycle ────────────────────────────────────────────
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   registerWindowIPC();
 
-  // Register audio IPC (wrapped in try/catch so a missing native module
-  // doesn't prevent the window from opening)
+  // Start Python backend first (window opens after port is known)
   try {
-    // Use dynamic import for ESM compatibility
-    import('./ipc/audio.js').then(({ registerAudioIPC }) => {
-      if (mainWindow) {
-        registerAudioIPC(mainWindow);
-      }
-    }).catch((err) => {
-      console.error('Audio IPC registration failed (non-fatal):', err.message);
-    });
+    setBackendCallbacks(
+      (port) => {
+        console.log(`[main] Backend ready on port ${port}`);
+        if (mainWindow) {
+          mainWindow.webContents.send('backend:ready', port);
+        }
+      },
+      (msg) => {
+        console.error(`[main] Backend error: ${msg}`);
+        if (mainWindow) {
+          mainWindow.webContents.send('backend:error', msg);
+        }
+      },
+    );
+    startBackend();  // Fire-and-forget — window opens immediately, connects when ready
   } catch (err) {
-    console.error('Audio IPC import failed (non-fatal):', err);
+    console.error('[main] Failed to start backend:', err);
+  }
+
+  // Audio IPC
+  try {
+    import('./ipc/audio.js').then(({ registerAudioIPC }) => {
+      if (mainWindow) registerAudioIPC(mainWindow);
+    }).catch((err) => console.error('Audio IPC:', err.message));
+  } catch (err) {
+    console.error('Audio IPC import:', err);
   }
 
   createWindow();
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  stopBackend();
+  if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  stopBackend();
 });

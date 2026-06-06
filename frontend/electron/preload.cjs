@@ -40,4 +40,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return function () { ipcRenderer.removeListener('audio:system-error', handler); };
     },
   },
+
+  // ── Backend ──────────────────────────────────────────────────
+  backend: {
+    getPort: function () { return ipcRenderer.invoke('backend:getPort'); },
+    onReady: function (callback) {
+      ipcRenderer.on('backend:ready', function (_event, port) { callback(port); });
+    },
+    onError: function (callback) {
+      ipcRenderer.on('backend:error', function (_event, msg) { callback(msg); });
+    },
+  },
 });

@@ -13,16 +13,15 @@ function copyPreloadPlugin() {
   const src = resolve(__dirname, 'electron/preload.cjs');
   const destDir = resolve(__dirname, 'dist-electron');
   const dest = resolve(destDir, 'preload.cjs');
+  function copy() {
+    mkdirSync(destDir, { recursive: true });
+    copyFileSync(src, dest);
+  }
   return {
     name: 'copy-preload',
-    buildStart() {
-      mkdirSync(destDir, { recursive: true });
-      copyFileSync(src, dest);
-    },
-    writeBundle() {
-      mkdirSync(destDir, { recursive: true });
-      copyFileSync(src, dest);
-    },
+    buildStart: copy,
+    writeBundle: copy,
+    configureServer() { copy(); },
   };
 }
 
