@@ -26,6 +26,8 @@ function App() {
   const wsRef = useRef<WebSocketClient | null>(null);
   const llm = useSettingsStore((s) => s.llm);
   const asr = useSettingsStore((s) => s.asr);
+  const srcLang = useSettingsStore((s) => s.sourceLang);
+  const tgtLang = useSettingsStore((s) => s.targetLang);
   const { wsState, backendPort, backendError, setWsState, setBackendPort, setBackendError } = useConnectionStore();
   const { entries, addEntry, correctEntry, clear: clearSubtitles } = useSubtitleStore();
 
@@ -92,7 +94,7 @@ function App() {
       client.sendControl({
         type: 'start',
         config: {
-          source_lang: 'en', target_lang: 'zh', audio_source: source,
+          source_lang: srcLang, target_lang: tgtLang, audio_source: source,
           enable_correction: llm.enabled,
           llm: { provider: llm.provider, apiKey: llm.apiKey, model: llm.model, baseUrl: llm.baseUrl, enabled: llm.enabled },
           asr: { provider: asr.provider, apiKey: asr.apiKey, apiSecret: asr.apiSecret, appId: "", baseUrl: asr.baseUrl },
@@ -120,7 +122,7 @@ function App() {
           </span>
           <div className="status-bar__right">
             <AudioVisualizer state={audioState} />
-            <span className="status-lang">English → 中文</span>
+            <span className="status-lang">{srcLang.toUpperCase()} → {tgtLang.toUpperCase()}</span>
             <button type="button" className="settings-gear" onClick={() => setHistoryOpen(true)} title="翻译历史">📋</button>
             <button type="button" className="settings-gear" onClick={() => setGlossaryOpen(true)} title="术语管理">📖</button>
             <button type="button" className="settings-gear" onClick={() => setSettingsOpen(true)} title="设置">⚙</button>

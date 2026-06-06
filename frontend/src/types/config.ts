@@ -55,6 +55,21 @@ export const ASR_PROVIDERS: AsrProviderInfo[] = [
   { id: 'baidu', name: '百度', description: '流式 ASR — 延迟 ~300ms，多语种支持好', needsApiKey: true, latency: '~300ms', cost: '0.006-0.015 元/分钟', defaultBaseUrl: 'https://vop.baidu.com/server_api' },
 ];
 
+// ── Languages ─────────────────────────────────────────────────
+
+export const SOURCE_LANGS = [
+  { code: 'en', name: 'English', label: '英语' },
+  { code: 'ja', name: 'Japanese', label: '日语' },
+  { code: 'ko', name: 'Korean', label: '韩语' },
+  { code: 'yue', name: 'Cantonese', label: '粤语' },
+  { code: 'zh', name: 'Chinese', label: '中文' },
+];
+
+export const TARGET_LANGS = [
+  { code: 'zh', name: 'Chinese', label: '中文' },
+  { code: 'en', name: 'English', label: '英语' },
+];
+
 // ── App Settings ──────────────────────────────────────────────
 
 export interface AppSettings {

@@ -26,6 +26,9 @@ interface SettingsStore extends AppSettings {
   setAsrApiKey: (k: string) => void;
   setAsrApiSecret: (s: string) => void;
   setAsrBaseUrl: (u: string) => void;
+  // Language
+  setSourceLang: (l: string) => void;
+  setTargetLang: (l: string) => void;
   reset: () => void;
 }
 
@@ -53,6 +56,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     setAsrApiKey: (apiKey) => set((s) => { const n = { ...s, asr: { ...s.asr, apiKey } }; save(n); return n; }),
     setAsrApiSecret: (apiSecret) => set((s) => { const n = { ...s, asr: { ...s.asr, apiSecret } }; save(n); return n; }),
     setAsrBaseUrl: (baseUrl) => set((s) => { const n = { ...s, asr: { ...s.asr, baseUrl } }; save(n); return n; }),
+    setSourceLang: (sourceLang) => set((s) => { const n = { ...s, sourceLang }; save(n); return n; }),
+    setTargetLang: (targetLang) => set((s) => { const n = { ...s, targetLang }; save(n); return n; }),
     reset: () => { set(DEFAULT_SETTINGS); save(DEFAULT_SETTINGS); },
   };
 });
