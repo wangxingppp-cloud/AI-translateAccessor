@@ -27,6 +27,7 @@ from ..engines.asr.stream_handler import StreamHandler
 from ..engines.translation.nmt_engine import get_nmt_engine
 from ..engines.translation.context_manager import TranslationContext
 from ..engines.correction.corrector import LLMCorrector, LLMConfig
+from ..engines.asr.cloud_asr import AsrEngineConfig, create_cloud_asr, StreamingASR
 
 router = APIRouter()
 
@@ -35,6 +36,8 @@ router = APIRouter()
 _session_handlers: dict[str, StreamHandler] = {}
 _session_contexts: dict[str, TranslationContext] = {}
 _session_llm_configs: dict[str, LLMConfig] = {}
+_session_cloud_asr: dict[str, StreamingASR] = {}
+_session_asr_configs: dict[str, AsrEngineConfig] = {}
 
 
 def _get_handler(session_id: str, create: bool = False) -> StreamHandler | None:
@@ -57,6 +60,8 @@ def _remove_handler(session_id: str) -> None:
         handler.reset()
     _session_contexts.pop(session_id, None)
     _session_llm_configs.pop(session_id, None)
+    _session_cloud_asr.pop(session_id, None)
+    _session_asr_configs.pop(session_id, None)
 
 
 async def _run_correction(
@@ -113,9 +118,26 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
         )
         return
 
-    # Initialize ASR handler and translation context
+    # Initialize local ASR handler and translation context
     _get_handler(session_id, create=True)
     _get_context(session_id, create=True)
+
+    # Parse ASR config from frontend
+    asr_raw = config.get("asr", {})
+    asr_config = AsrEngineConfig(
+        provider=asr_raw.get("provider", "local"),
+        api_key=asr_raw.get("apiKey", ""),
+        api_secret=asr_raw.get("apiSecret", ""),
+        app_id=asr_raw.get("appId", ""),
+        base_url=asr_raw.get("baseUrl", ""),
+    )
+    _session_asr_configs[session_id] = asr_config
+    if asr_config.provider != "local" and asr_config.api_key:
+        try:
+            _session_cloud_asr[session_id] = create_cloud_asr(asr_config)
+            logger.info(f"Session [{session_id}] using cloud ASR: {asr_config.provider}")
+        except Exception as e:
+            logger.warning(f"Cloud ASR init failed: {e}")
 
     # Parse LLM config from frontend
     llm_raw = config.get("llm", {})
@@ -178,6 +200,10 @@ async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
                 ).model_dump()
             )
 
+        cloud_asr = _session_cloud_asr.get(session_id)
+        if cloud_asr:
+            try: await cloud_asr.close()
+            except: pass
         _remove_handler(session_id)
         sessions.remove(session_id)
     except KeyError:
@@ -245,6 +271,27 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
         return
 
     sessions.record_audio_chunk(session_id)
+
+    cloud_asr = _session_cloud_asr.get(session_id)
+    if cloud_asr:
+        try:
+            async for asr_result in cloud_asr.process_chunk(data):
+                if asr_result.text:
+                    sessions.record_sentence(session_id)
+                    nmt_engine = get_nmt_engine()
+                    translation = await nmt_engine.translate(asr_result.text)
+                    seq_id = str(uuid.uuid4())
+                    ctx = _get_context(session_id)
+                    if ctx and translation.text:
+                        ctx.add(source=asr_result.text, target=translation.text, sequence_id=seq_id, timestamp=time.time())
+                    await ws.send_json(
+                        SubtitleDraft(sequence_id=seq_id, original=asr_result.text, translated=translation.text,
+                                      is_sentence_end=asr_result.is_final, confidence=asr_result.confidence,
+                                      latency_ms=round(translation.latency_ms), timestamp=asr_result.timestamp).model_dump()
+                    )
+        except Exception as e:
+            logger.warning(f"Cloud ASR error [{session_id}]: {e}")
+        return
 
     handler = _get_handler(session_id)
     if not handler:
@@ -372,6 +419,10 @@ async def translate_websocket(websocket: WebSocket):
         except Exception:
             pass
     finally:
+        cloud_asr = _session_cloud_asr.get(session_id)
+        if cloud_asr:
+            try: await cloud_asr.close()
+            except: pass
         _remove_handler(session_id)
         sessions.remove(session_id)
         manager.disconnect(session_id)

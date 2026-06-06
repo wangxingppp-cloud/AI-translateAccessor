@@ -21,6 +21,7 @@ function App() {
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const llm = useSettingsStore((s) => s.llm);
+  const asr = useSettingsStore((s) => s.asr);
   const { wsState, backendPort, backendError, setWsState, setBackendPort, setBackendError } = useConnectionStore();
   const { entries, addEntry, correctEntry, clear: clearSubtitles } = useSubtitleStore();
 
@@ -90,11 +91,12 @@ function App() {
           source_lang: 'en', target_lang: 'zh', audio_source: source,
           enable_correction: llm.enabled,
           llm: { provider: llm.provider, apiKey: llm.apiKey, model: llm.model, baseUrl: llm.baseUrl, enabled: llm.enabled },
+          asr: { provider: asr.provider, apiKey: asr.apiKey, apiSecret: asr.apiSecret, appId: "", baseUrl: asr.baseUrl },
         },
       });
       startCapture(source);
     }
-  }, [isTranslating, stopCapture, startCapture, source, llm, clearSubtitles]);
+  }, [isTranslating, stopCapture, startCapture, source, llm, asr, clearSubtitles]);
 
   return (
     <div className="app-container">
