@@ -204,7 +204,16 @@ async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
     try:
         # Flush any pending ASR results before ending
         handler = _get_handler(session_id)
-        if handler and handler.has_pending_speech():
+        if handler:
+            if handler.has_pending_speech():
+                final_result = await handler.flush()
+                if final_result and final_result.text:
+                    await ws.send_json(
+                        SubtitleFinal(sequence_id=str(uuid.uuid4()),
+                            original=final_result.text, translated=final_result.text,
+                            confidence=final_result.confidence, timestamp=final_result.timestamp).model_dump()
+                    )
+            handler.reset()  # Reset VAD state for next session
             final_result = await handler.flush()
             if final_result and final_result.text:
                 await ws.send_json(
@@ -392,8 +401,9 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                     )
 
     except Exception as e:
-        if "Cannot call" not in str(e):
-            logger.warning(f"Audio processing error [{session_id}]: {e}")
+        if "Cannot call" in str(e):
+            raise  # WS died, let main loop break
+        logger.warning(f"Audio processing error [{session_id}]: {e}")
 
 
 # ── Main WebSocket endpoint ──────────────────────────────────────
@@ -444,22 +454,20 @@ async def translate_websocket(websocket: WebSocket):
         while True:
             # Read from queue AND WebSocket concurrently
             if sys_queue:
-                # System capture: read audio from queue, then check control
+                pcm = await sys_queue.get()
                 try:
-                    pcm = await asyncio.wait_for(sys_queue.get(), timeout=0.5)
-                    _mq = getattr(_process_audio_chunk, '_n', 0)
-                    if _mq <= 3:
-                        logger.info(f"[MAIN] Got {len(pcm)}B from queue (total processed: {_mq})")
                     await _process_audio_chunk(session_id, websocket, pcm)
-                except asyncio.TimeoutError:
-                    pass
-                try:
-                    data = await asyncio.wait_for(websocket.receive(), timeout=0.05)
-                    if "text" in data:
-                        await _process_control_message(session_id, websocket, data["text"])
-                        sys_queue = _session_sys_queues.get(session_id)
-                except asyncio.TimeoutError:
-                    pass
+                except Exception:
+                    break  # WS closed, stop processing
+                # Check WS control every 50th chunk
+                if getattr(_process_audio_chunk, '_n', 0) % 50 == 0:
+                    try:
+                        data = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+                        if "text" in data:
+                            await _process_control_message(session_id, websocket, data["text"])
+                            sys_queue = _session_sys_queues.get(session_id)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
             else:
                 data = await websocket.receive()
                 if "text" in data:
