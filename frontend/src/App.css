@@ -357,3 +357,11 @@ body {
 .test-msg { font-size: 12px; line-height: 1.4; }
 .test-msg--ok { color: var(--color-success); }
 .test-msg--err { color: var(--color-danger); }
+
+/* ── Subtitle Lines ──────────────────────────────────────────── */
+.subtitle-list { display: flex; flex-direction: column; gap: 12px; }
+.subtitle-line { padding: 8px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); transition: background 0.3s; }
+.subtitle-line--corrected { background: rgba(99,102,241,0.08); }
+.subtitle-line__original { font-size: 13px; color: var(--color-text-muted); margin-bottom: 2px; }
+.subtitle-line__translated { font-size: 15px; color: var(--color-text); font-weight: 500; }
+.subtitle-line--corrected .subtitle-line__translated { color: var(--color-primary-hover); }
