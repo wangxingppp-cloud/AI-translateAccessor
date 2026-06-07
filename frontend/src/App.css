@@ -1512,6 +1512,27 @@ body {
   gap: 14px;
   position: relative;
   z-index: 5;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+.subtitle-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.subtitle-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.subtitle-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+.subtitle-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
 }
 
 .subtitle-line {

@@ -34,6 +34,69 @@ from ..engines.translation.nmt_engine import get_nmt_engine
 router = APIRouter()
 
 
+# ── Shared translation utilities ──────────────────────────────────
+
+def _is_valid_translation(original: str, translated: str, target_lang: str = "zh") -> bool:
+    """Check if translation is valid (not just returning the original)."""
+    if not translated or translated.strip() == original.strip():
+        return False
+    if target_lang == "zh":
+        chinese = sum(1 for c in translated if '一' <= c <= '鿿')
+        return chinese > len(translated) * 0.3
+    return True
+
+
+async def _do_translate(ws, session_id: str, sid: str, full_text: str):
+    """Translate full_text: NMT fast → LLM refinement (with validation)."""
+    try:
+        s = sessions.get(session_id)
+        if s and s.state != SessionState.LISTENING:
+            return
+
+        # Phase 1: NMT fast translation (~100-300ms)
+        nmt = get_nmt_engine()
+        nmt_result = ""
+        if nmt.ready:
+            nmt_result = await asyncio.get_event_loop().run_in_executor(
+                None, nmt.translate, full_text
+            )
+            if nmt_result:
+                logger.info(f"[NMT] sid={sid[:6]} '{full_text[:40]}' → '{nmt_result[:40]}'")
+                await ws.send_json(SubtitleDraft(
+                    sequence_id=sid, original=full_text, translated=nmt_result,
+                    is_sentence_end=True, is_replace=True,
+                    timestamp=time.time()
+                ).model_dump())
+
+        # Phase 2: LLM refinement (if configured)
+        llm_cfg = _session_llm_configs.get(session_id)
+        if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+            from ..engines.correction.corrector import LLMCorrector
+            corrector = LLMCorrector(llm_cfg)
+            src_l = (s.config.source_lang if s else "EN").upper()
+            tgt_l = (s.config.target_lang if s else "ZH").upper()
+            prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
+            result = await corrector._call_llm(prompt)
+            llm_result = result.strip()
+
+            if _is_valid_translation(full_text, llm_result, "zh"):
+                logger.info(f"[LLM] sid={sid[:6]} '{full_text[:40]}' → '{llm_result[:40]}'")
+                s = sessions.get(session_id)
+                if s and s.state != SessionState.LISTENING:
+                    return
+                await ws.send_json(SubtitleDraft(
+                    sequence_id=sid, original=full_text, translated=llm_result,
+                    is_sentence_end=True, is_replace=True,
+                    timestamp=time.time()
+                ).model_dump())
+            else:
+                logger.info(f"[LLM] sid={sid[:6]} 无效翻译(非中文)，保留NMT: '{llm_result[:40]}'")
+        elif not nmt_result:
+            logger.warning(f"[TX] sid={sid[:6]} NMT不可用且LLM未配置，跳过翻译")
+    except Exception as e:
+        logger.error(f"[CloudTX] translate error: {e}")
+
+
 # ── Sentence accumulator — shared by mic and system audio paths ──
 
 class SentenceAccumulator:
@@ -300,6 +363,8 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
         enabled=llm_raw.get("enabled", False),
     )
 
+    # Translation is handled by module-level _do_translate(ws, session_id, sid, text)
+
     # Start system audio capture if audio_source is 'system'
     cloud_asr = _session_cloud_asr.get(session_id)
 
@@ -308,66 +373,6 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
             import numpy as np
             # Cloud ASR path: feed PCM directly, no local SenseVoice
             if cloud_asr:
-                def _is_valid_translation(original: str, translated: str, target_lang: str = "zh") -> bool:
-                    """Check if translation is valid (not just returning the original)."""
-                    if not translated or translated.strip() == original.strip():
-                        return False
-                    if target_lang == "zh":
-                        # Check Chinese character ratio
-                        chinese = sum(1 for c in translated if '一' <= c <= '鿿')
-                        return chinese > len(translated) * 0.3
-                    return True
-
-                async def _do_translate(sid: str, full_text: str):
-                    """Translate full_text: NMT fast → LLM refinement (with validation)."""
-                    try:
-                        s = sessions.get(session_id)
-                        if s and s.state != SessionState.LISTENING:
-                            return
-
-                        # Phase 1: NMT fast translation (~100-300ms)
-                        nmt = get_nmt_engine()
-                        nmt_result = ""
-                        if nmt.ready:
-                            nmt_result = await asyncio.get_event_loop().run_in_executor(
-                                None, nmt.translate, full_text
-                            )
-                            if nmt_result:
-                                logger.info(f"[NMT] sid={sid[:6]} '{full_text[:40]}' → '{nmt_result[:40]}'")
-                                await ws.send_json(SubtitleDraft(
-                                    sequence_id=sid, original=full_text, translated=nmt_result,
-                                    is_sentence_end=True, is_replace=True,
-                                    timestamp=time.time()
-                                ).model_dump())
-
-                        # Phase 2: LLM refinement (if configured)
-                        llm_cfg = _session_llm_configs.get(session_id)
-                        if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
-                            from ..engines.correction.corrector import LLMCorrector
-                            corrector = LLMCorrector(llm_cfg)
-                            src_l = (s.config.source_lang if s else "EN").upper()
-                            tgt_l = (s.config.target_lang if s else "ZH").upper()
-                            prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
-                            result = await corrector._call_llm(prompt)
-                            llm_result = result.strip()
-
-                            # Validate: LLM output must be in target language
-                            if _is_valid_translation(full_text, llm_result, "zh"):
-                                logger.info(f"[LLM] sid={sid[:6]} '{full_text[:40]}' → '{llm_result[:40]}'")
-                                s = sessions.get(session_id)
-                                if s and s.state != SessionState.LISTENING:
-                                    return
-                                await ws.send_json(SubtitleDraft(
-                                    sequence_id=sid, original=full_text, translated=llm_result,
-                                    is_sentence_end=True, is_replace=True,
-                                    timestamp=time.time()
-                                ).model_dump())
-                            else:
-                                logger.info(f"[LLM] sid={sid[:6]} 无效翻译(非中文)，保留NMT: '{llm_result[:40]}'")
-                        elif not nmt_result:
-                            logger.warning(f"[TX] sid={sid[:6]} NMT不可用且LLM未配置，跳过翻译")
-                    except Exception as e:
-                        logger.error(f"[CloudTX] translate error: {e}")
 
                 _cloud_pcm_queue: asyncio.Queue = asyncio.Queue()
 
@@ -430,7 +435,7 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
                                         _, sid, text = action
                                         logger.info(f"[DBG-TX] sys commit: sid={sid} text='{text[:50]}'")
                                         await ws.send_json(_send_final(sid, text).model_dump())
-                                        asyncio.ensure_future(_do_translate(sid, text))
+                                        asyncio.ensure_future(_do_translate(ws, session_id, sid, text))
                         except Exception as e:
                             logger.error(f'[CloudASR:sys] error: {e}')
 
@@ -439,7 +444,7 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
                         _, sid, text = action
                         logger.info(f"[DBG-TX] sys drain: sid={sid} text='{text[:50]}'")
                         await ws.send_json(_send_final(sid, text).model_dump())
-                        asyncio.ensure_future(_do_translate(sid, text))
+                        asyncio.ensure_future(_do_translate(ws, session_id, sid, text))
                     logger.info('[CloudASR:sys] loop ended')
 
                 _cloud_asr_task = asyncio.ensure_future(_cloud_asr_loop())
@@ -460,30 +465,17 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
                 ring = RingBuffer()
                 gen = MarkGenerator(ring)
                 async def _tx(original: str, duration: float):
+                    """Local ASR sentence callback — send to frontend + translate (NMT + LLM)."""
                     logger.info(f"[TX] \"{original[:60]}\" ({duration:.1f}s)")
-                    s = sessions.get(session_id)
-                    glossary = [t.model_dump() for t in s.config.glossary_terms] if s else []
-                    llm_cfg = _session_llm_configs.get(session_id)
-                    if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
-                        from ..engines.correction.corrector import LLMCorrector
-                        try:
-                            corrector = LLMCorrector(llm_cfg)
-                            s = sessions.get(session_id)
-                            src_l = (s.config.source_lang if s else "EN").upper()
-                            tgt_l = (s.config.target_lang if s else "ZH").upper()
-                            prompt = f"Translate {src_l} to {tgt_l}:\n\n{original}\n\n{tgt_l}:"
-                            result = await corrector._call_llm(prompt)
-                            translated = result.strip() or original
-                        except Exception:
-                            translated = original
-                    else:
-                        logger.warning(f"[TX] LLM未配置，返回原文")
-                        translated = original
                     seq_id = str(uuid.uuid4())
-                    ctx = _get_context(session_id)
-                    if ctx and translated:
-                        ctx.add(source=original, target=translated, sequence_id=seq_id, timestamp=time.time())
-                    await ws.send_json(SubtitleDraft(sequence_id=seq_id, original=original, translated=translated, is_sentence_end=True, timestamp=time.time()).model_dump())
+                    # Send original text immediately
+                    await ws.send_json(SubtitleDraft(
+                        sequence_id=seq_id, original=original, translated="",
+                        is_sentence_end=True, is_replace=False,
+                        timestamp=time.time()
+                    ).model_dump())
+                    # Translate via shared function (NMT fast + LLM refinement)
+                    await _do_translate(ws, session_id, seq_id, original)
                 worker = TranscriptionWorker(ring, gen.queue, _tx)
                 cap = get_audio_capture()
                 cap.start(lambda pcm: ring.write(np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0))
@@ -656,30 +648,8 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                             SubtitleDraft(sequence_id=sid, original=text, translated="",
                                           is_sentence_end=True, timestamp=time.time()).model_dump()
                         )
-                        # Translate via LLM
-                        async def _bg_translate(_sid=sid, _text=text):
-                            try:
-                                s = sessions.get(session_id)
-                                llm_cfg = _session_llm_configs.get(session_id)
-                                if not (llm_cfg and llm_cfg.enabled and llm_cfg.api_key):
-                                    logger.warning(f"[DBG-TX] mic翻译: LLM未配置，跳过 sid={_sid[:6]}")
-                                    return
-                                from ..engines.correction.corrector import LLMCorrector
-                                corrector = LLMCorrector(llm_cfg)
-                                src_l = (s.config.source_lang if s else "EN").upper()
-                                tgt_l = (s.config.target_lang if s else "ZH").upper()
-                                prompt = f"Translate {src_l} to {tgt_l}:\n\n{_text}\n\n{tgt_l}:"
-                                result = await corrector._call_llm(prompt)
-                                translated = result.strip() or _text
-                                logger.info(f"[DBG-TX] mic翻译(LLM): sid={_sid[:6]} '{_text[:40]}' → '{translated[:40]}'")
-                                await ws.send_json(
-                                    SubtitleDraft(sequence_id=_sid, original=_text, translated=translated,
-                                                  is_sentence_end=True, is_replace=True,
-                                                  timestamp=time.time()).model_dump()
-                                )
-                            except Exception as e:
-                                logger.error(f"[DBG-TX] mic翻译异常: {e}")
-                        asyncio.ensure_future(_bg_translate())
+                        # Translate via shared function (NMT fast + LLM refinement)
+                        asyncio.ensure_future(_do_translate(ws, session_id, sid, text))
 
         except Exception as e:
             logger.warning(f"Cloud ASR error [{session_id}]: {e}", exc_info=True)
@@ -702,71 +672,15 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
             if asr_result.text:
                 logger.info(f"[DBG-TRACK] ⑤本地ASR结果: text='{asr_result.text}' is_final={asr_result.is_final}")
                 sessions.record_sentence(session_id)
-
-                # Translation via LLM
-                s = sessions.get(session_id)
-                glossary = [t.model_dump() for t in s.config.glossary_terms] if s else []
-                llm_cfg = _session_llm_configs.get(session_id)
-                tx_backend = "llm"
-                latency_ms = 0
-                if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
-                    from ..engines.correction.corrector import LLMCorrector
-                    corrector = LLMCorrector(llm_cfg)
-                    src = sessions.get(session_id).config.source_lang if session_id else "EN".upper() if session and session.config else 'EN'
-                    tgt = sessions.get(session_id).config.target_lang if session_id else "ZH".upper() if session and session.config else 'ZH'
-                    prompt = f"""Translate the following {src} text to {tgt}.
-
-{src}: {asr_result.text}
-
-{tgt}:"""
-                    result = await corrector._call_llm(prompt)
-                    translated_text = result.strip() or asr_result.text
-                else:
-                    logger.warning(f"[DBG-TX] 本地ASR: LLM未配置，返回原文")
-                    translated_text = asr_result.text
-                    tx_backend = "none"
-
-                # Store context for future LLM correction
                 seq_id = str(uuid.uuid4())
-                ctx = _get_context(session_id)
-                if ctx and translated_text:
-                    ctx.add(
-                        source=asr_result.text,
-                        target=translated_text,
-                        sequence_id=seq_id,
-                        timestamp=time.time(),
-                    )
-
-                # Send draft to client
-                logger.info(f"[DBG-TRACK] ⑥翻译完成: \"{asr_result.text[:50]}\" → \"{translated_text[:50]}\" backend={tx_backend}")
-                logger.info(f"[SEND] subtitle_draft: \"{asr_result.text[:50]}\" → \"{translated_text[:50]}\"")
-                await ws.send_json(
-                    SubtitleDraft(
-                        sequence_id=seq_id,
-                        original=asr_result.text,
-                        translated=translated_text,
-                        is_sentence_end=asr_result.is_final,
-                        confidence=asr_result.confidence,
-                        latency_ms=round(latency_ms),
-                        timestamp=asr_result.timestamp,
-                    ).model_dump()
-                )
-
-                # Async LLM correction (fire and forget)
-                llm_config = _session_llm_configs.get(session_id)
-                if llm_config and llm_config.enabled and llm_config.api_key:
-                    ctx = _get_context(session_id)
-                    context_pairs = [(e.source, e.target) for e in (ctx.get_recent(4) if ctx else [])]
-                    asyncio.create_task(
-                        _run_correction(
-                            ws=ws,
-                            session_id=session_id,
-                            original=asr_result.text,
-                            draft=translated_text,
-                            seq_id=seq_id,
-                            context=context_pairs,
-                        )
-                    )
+                # Send original text immediately
+                await ws.send_json(SubtitleDraft(
+                    sequence_id=seq_id, original=asr_result.text, translated="",
+                    is_sentence_end=True, is_replace=False,
+                    timestamp=asr_result.timestamp,
+                ).model_dump())
+                # Translate via shared function (NMT fast + LLM refinement)
+                await _do_translate(ws, session_id, seq_id, asr_result.text)
 
     except Exception as e:
         if "Cannot call" in str(e):

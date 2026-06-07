@@ -18,7 +18,7 @@ except ImportError:
 class NMTEngine:
     """Local NMT translation using ONNX quantized model."""
 
-    def __init__(self, model_dir: str = "models/nmt-en-zh"):
+    def __init__(self, model_dir: str | None = None):
         self._ready = False
         self._encoder = None
         self._decoder = None
@@ -27,6 +27,12 @@ class NMTEngine:
         if not _HAS_TRANSFORMERS:
             logger.warning("transformers not installed, NMT disabled")
             return
+
+        # Resolve model path from config if not provided
+        if model_dir is None:
+            from ...config import get_settings
+            settings = get_settings()
+            model_dir = str(settings.resolved_models_dir / "nmt-en-zh")
 
         try:
             t0 = time.time()
