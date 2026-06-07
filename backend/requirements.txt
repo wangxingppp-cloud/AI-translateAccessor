@@ -23,6 +23,7 @@ redis>=5.0
 
 # Audio processing
 numpy>=1.26
+soundfile>=0.12
 
 # Utilities
 python-dotenv>=1.0

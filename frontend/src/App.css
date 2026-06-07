@@ -1545,6 +1545,54 @@ body {
   color: #80EDFF;
 }
 
+/* ── Translated row with TTS button ────────────────────────── */
+.subtitle-line__translated-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.subtitle-line__translated-row .subtitle-line__translated {
+  flex: 1;
+}
+
+/* ── TTS speaker button (hover-to-reveal) ──────────────────── */
+.tts-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-dim);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: all var(--transition-fast) var(--ease-out);
+}
+
+.subtitle-line:hover .tts-btn {
+  opacity: 1;
+}
+
+.tts-btn:hover {
+  color: var(--color-primary);
+  background: rgba(0, 212, 255, 0.08);
+}
+
+.tts-btn--playing {
+  opacity: 1;
+  color: var(--color-primary);
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.tts-btn:disabled {
+  opacity: 0.4;
+  cursor: wait;
+}
+
 /* ── Flash animation on LLM correction ─────────────────────── */
 .subtitle-line--flash {
   animation: flash-correction 2s var(--ease-out);

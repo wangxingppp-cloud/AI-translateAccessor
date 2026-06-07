@@ -158,8 +158,10 @@ def _cleanup_session(session_id: str) -> None:
     system = _session_systems.pop(session_id, None)
     if system:
         _, gen, worker = system
-        gen.stop()
-        worker.stop()
+        if gen:
+            gen.stop()
+        if worker:
+            worker.stop()
     _session_contexts.pop(session_id, None)
     _session_llm_configs.pop(session_id, None)
     _session_cloud_asr.pop(session_id, None)
@@ -519,8 +521,9 @@ async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
         system = _session_systems.get(session_id)
         if system:
             _, gen, _ = system
-            await gen.drain()
-            await asyncio.sleep(1.5)  # Let worker process drain
+            if gen:
+                await gen.drain()
+                await asyncio.sleep(1.5)  # Let worker process drain
 
         session = sessions.get(session_id)
         if session:
@@ -539,8 +542,9 @@ async def _handle_stop(session_id: str, ws: WebSocket, _payload: dict) -> None:
         system = _session_systems.get(session_id)
         if system:
             _, gen, _ = system
-            await gen.drain()
-            await asyncio.sleep(1)  # Let worker process the drain mark
+            if gen:
+                await gen.drain()
+                await asyncio.sleep(1)  # Let worker process the drain mark
         _cleanup_session(session_id)
         sessions.remove(session_id)
     except KeyError:
@@ -853,8 +857,9 @@ async def translate_websocket(websocket: WebSocket):
         system = _session_systems.get(session_id)
         if system:
             _, gen, _ = system
-            await gen.drain()
-            await asyncio.sleep(1)  # Let worker process the drain mark
+            if gen:
+                await gen.drain()
+                await asyncio.sleep(1)  # Let worker process the drain mark
         _cleanup_session(session_id)
         sessions.remove(session_id)
         manager.disconnect(session_id)
