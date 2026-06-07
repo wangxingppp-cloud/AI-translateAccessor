@@ -85,8 +85,11 @@ export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
       // Search all entries for matching id
       const idx = s.entries.findIndex((e) => e.id === id);
       if (idx >= 0) {
+        const entry = s.entries[idx];
+        // If entry already has a translation (NMT), mark as corrected (LLM refined)
+        const isRefined = entry.translated && entry.translated !== translated;
         const updated = [...s.entries];
-        updated[idx] = { ...updated[idx], translated };
+        updated[idx] = { ...entry, translated, isCorrected: isRefined };
         return { entries: updated };
       }
       // Also check pending

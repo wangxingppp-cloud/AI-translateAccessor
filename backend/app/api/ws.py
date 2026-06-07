@@ -308,8 +308,18 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
             import numpy as np
             # Cloud ASR path: feed PCM directly, no local SenseVoice
             if cloud_asr:
+                def _is_valid_translation(original: str, translated: str, target_lang: str = "zh") -> bool:
+                    """Check if translation is valid (not just returning the original)."""
+                    if not translated or translated.strip() == original.strip():
+                        return False
+                    if target_lang == "zh":
+                        # Check Chinese character ratio
+                        chinese = sum(1 for c in translated if '一' <= c <= '鿿')
+                        return chinese > len(translated) * 0.3
+                    return True
+
                 async def _do_translate(sid: str, full_text: str):
-                    """Translate full_text: NMT fast → LLM refinement."""
+                    """Translate full_text: NMT fast → LLM refinement (with validation)."""
                     try:
                         s = sessions.get(session_id)
                         if s and s.state != SessionState.LISTENING:
@@ -339,16 +349,21 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
                             tgt_l = (s.config.target_lang if s else "ZH").upper()
                             prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
                             result = await corrector._call_llm(prompt)
-                            translated = result.strip() or full_text
-                            logger.info(f"[LLM] sid={sid[:6]} '{full_text[:40]}' → '{translated[:40]}'")
-                            s = sessions.get(session_id)
-                            if s and s.state != SessionState.LISTENING:
-                                return
-                            await ws.send_json(SubtitleDraft(
-                                sequence_id=sid, original=full_text, translated=translated,
-                                is_sentence_end=True, is_replace=True,
-                                timestamp=time.time()
-                            ).model_dump())
+                            llm_result = result.strip()
+
+                            # Validate: LLM output must be in target language
+                            if _is_valid_translation(full_text, llm_result, "zh"):
+                                logger.info(f"[LLM] sid={sid[:6]} '{full_text[:40]}' → '{llm_result[:40]}'")
+                                s = sessions.get(session_id)
+                                if s and s.state != SessionState.LISTENING:
+                                    return
+                                await ws.send_json(SubtitleDraft(
+                                    sequence_id=sid, original=full_text, translated=llm_result,
+                                    is_sentence_end=True, is_replace=True,
+                                    timestamp=time.time()
+                                ).model_dump())
+                            else:
+                                logger.info(f"[LLM] sid={sid[:6]} 无效翻译(非中文)，保留NMT: '{llm_result[:40]}'")
                         elif not nmt_result:
                             logger.warning(f"[TX] sid={sid[:6]} NMT不可用且LLM未配置，跳过翻译")
                     except Exception as e:
