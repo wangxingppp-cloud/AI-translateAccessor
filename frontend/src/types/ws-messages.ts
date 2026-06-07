@@ -108,7 +108,7 @@ export interface StatusMessage {
   metrics?: {
     audio_buffer_ms: number;
     asr_latency_ms: number;
-    nmt_latency_ms: number;
+    translation_latency_ms: number;
     total_latency_ms: number;
   };
 }

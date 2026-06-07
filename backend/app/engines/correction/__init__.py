@@ -1,6 +1,6 @@
 """Correction Engine package.
 
-LLM-based translation correction for post-NMT refinement.
+LL-based translation correction and refinement.
 """
 from .corrector import LLMCorrector, CorrectionResult, LLMConfig
 

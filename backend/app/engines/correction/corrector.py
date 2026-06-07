@@ -1,18 +1,15 @@
 """
-LLM-based translation correction engine.
+LLM-based translation and correction engine.
 
-After NMT produces a fast initial translation, this engine sends the
-text to an LLM for refinement. It uses the provider configuration
-sent by the frontend (provider, apiKey, model, baseUrl).
+Provides two capabilities:
+  1. Translation: Direct LLM translation (source language → target language)
+  2. Correction: Asynchronous refinement of draft translations
 
 Supported providers:
   - openai    → OpenAI API (gpt-4o, gpt-4o-mini, etc.)
   - anthropic → Anthropic API (claude-sonnet-4-6, claude-haiku-4-5, etc.)
   - deepseek  → DeepSeek API (OpenAI-compatible)
   - custom    → Custom OpenAI-compatible endpoint (Ollama, vLLM, etc.)
-
-The correction is asynchronous — NMT result is sent immediately,
-LLM correction arrives 1-3 seconds later as a subtitle_corrected message.
 """
 import time
 from dataclasses import dataclass, field
@@ -25,7 +22,7 @@ from loguru import logger
 class CorrectionResult:
     """Result from LLM translation correction."""
     original: str                     # Source text (English)
-    draft: str                        # NMT initial translation
+    draft: str                        # Initial translation
     corrected: str                    # LLM-corrected translation
     diff_segments: list[dict] = field(default_factory=list)  # For UI highlighting
     latency_ms: float = 0.0
@@ -91,7 +88,7 @@ Output ONLY the corrected Chinese translation. No explanations, no quotes, no pr
 
         Args:
             original: The source text (English).
-            draft: The NMT initial translation.
+            draft: The initial translation.
             context: List of (source, translation) tuples for recent sentences.
 
         Returns:
@@ -147,7 +144,7 @@ Output ONLY the corrected Chinese translation. No explanations, no quotes, no pr
             return CorrectionResult(
                 original=original,
                 draft=draft,
-                corrected=draft,  # Fall back to NMT result
+                corrected=draft,  # Fall back to initial translation
                 latency_ms=(time.perf_counter() - start) * 1000,
             )
 

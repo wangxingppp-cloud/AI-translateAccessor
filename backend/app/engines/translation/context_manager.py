@@ -2,8 +2,8 @@
 Translation context manager.
 
 Maintains a sliding window of recent translations for LLM context.
-Used by both the NMT pipeline (for reference) and LLM correction
-(to understand preceding sentences).
+Used by LLM correction to understand preceding sentences and
+maintain terminology consistency.
 """
 from collections import deque
 from dataclasses import dataclass, field

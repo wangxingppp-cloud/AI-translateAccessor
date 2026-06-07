@@ -6,11 +6,6 @@ websockets>=12.0
 # Sherpa-onnx ASR
 sherpa-onnx>=1.10
 
-# NMT Translation (will be installed when translation module is built)
-# transformers
-# torch
-# sentencepiece
-
 # LLM clients
 openai>=1.50
 # anthropic  (uncomment when Claude integration is added)
