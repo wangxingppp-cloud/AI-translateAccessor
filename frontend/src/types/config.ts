@@ -80,8 +80,51 @@ export interface AppSettings {
   targetLang: string;
 }
 
+// ── TTS (text-to-speech) ────────────────────────────────────
+
+export type TtsProvider = 'local' | 'edge' | 'openai' | 'custom';
+
+export interface TtsProviderInfo {
+  id: TtsProvider;
+  name: string;
+  description: string;
+  voices: string[];
+  defaultVoice: string;
+  needsApiKey: boolean;
+  latency: string;
+  cost: string;
+  defaultBaseUrl: string;
+}
+
+export interface TtsConfig {
+  provider: TtsProvider;
+  apiKey: string;
+  model: string;
+  voice: string;
+  baseUrl: string;
+  enabled: boolean;
+}
+
+export const TTS_PROVIDERS: TtsProviderInfo[] = [
+  { id: 'local', name: '本地离线', description: 'ZipVoice INT8 — 免费，延迟 ~2s，无需网络', voices: [], defaultVoice: '', needsApiKey: false, latency: '~2s', cost: '免费', defaultBaseUrl: '' },
+  { id: 'edge', name: 'Edge TTS', description: '微软 Edge — 免费，中文自然度高，无需 Key', voices: ['zh-CN-XiaoxiaoNeural', 'zh-CN-YunxiNeural', 'zh-CN-YunyangNeural', 'en-US-JennyNeural'], defaultVoice: 'zh-CN-XiaoxiaoNeural', needsApiKey: false, latency: '~1s', cost: '免费', defaultBaseUrl: '' },
+  { id: 'openai', name: 'OpenAI', description: 'tts-1 / tts-1-hd — 音质好，按量付费', voices: ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'], defaultVoice: 'alloy', needsApiKey: true, latency: '~1s', cost: '$15/1M字符', defaultBaseUrl: 'https://api.openai.com/v1' },
+  { id: 'custom', name: '自定义', description: 'OpenAI 兼容接口', voices: [], defaultVoice: '', needsApiKey: true, latency: '取决于服务', cost: '取决于服务', defaultBaseUrl: '' },
+];
+
+// ── App Settings ──────────────────────────────────────────────
+
+export interface AppSettings {
+  llm: LLMConfig;
+  asr: AsrConfig;
+  tts: TtsConfig;
+  sourceLang: string;
+  targetLang: string;
+}
+
 export const DEFAULT_SETTINGS: AppSettings = {
   llm: { provider: 'openai', apiKey: '', model: 'gpt-4o-mini', baseUrl: 'https://api.openai.com/v1', enabled: false },
   asr: { provider: 'local', apiKey: '', apiSecret: '', appId: '', baseUrl: '' },
+  tts: { provider: 'local', apiKey: '', model: 'tts-1', voice: 'zh-CN-XiaoxiaoNeural', baseUrl: '', enabled: true },
   sourceLang: 'en', targetLang: 'zh',
 };
