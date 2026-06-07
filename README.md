@@ -3,6 +3,8 @@ AI 同声传译助手 — 实时语音识别、翻译与字幕显示桌面应用
 
 演示视频链接：【ai实时翻译录制】https://www.bilibili.com/video/BV1zJEh6vEyQ?vd_source=f910472429de506419647e40a886d42d
 
+应用安装文件在github release中
+
 ## 功能特性
 
 - **实时语音识别** — 支持本地离线 ASR（sherpa-onnx SenseVoice / Zipformer / Paraformer）和云端 ASR（讯飞 RTASR、讯飞 IAT、百度）
