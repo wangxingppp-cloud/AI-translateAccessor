@@ -1,8 +1,10 @@
 /**
- * Subtitle state store — manages the real-time subtitle display list.
+ * Subtitle state store — committed (history) + pending (real-time).
  *
- * Entries are added when ASR produces text, updated when LLM correction arrives,
- * and optionally persisted for translation history.
+ * Design:
+ *   - committed: finalized sentences with translations, immutable
+ *   - pending: in-progress sentence, updates in real-time
+ *   - Translation arrives async, matched by sequence_id
  */
 import { create } from 'zustand';
 import type { DiffSegment } from '../types/ws-messages';
@@ -17,58 +19,81 @@ export interface SubtitleEntry {
 }
 
 interface SubtitleStore {
-  /** Completed sentences (history). */
+  /** Committed sentences (history, immutable once added). */
   entries: SubtitleEntry[];
-  /** Current in-progress sentence (real-time display). */
-  current: SubtitleEntry | null;
-  /** Add or update subtitle (handles final vs in-progress). */
-  addEntry: (entry: SubtitleEntry & { isFinal?: boolean; isReplace?: boolean }) => void;
-  /** Update an existing entry with corrected text + diff. */
+  /** Pending sentence (real-time, replaces on each update). */
+  pending: SubtitleEntry | null;
+  /** Add pending update or commit a sentence. */
+  addEntry: (entry: SubtitleEntry & { isFinal?: boolean }) => void;
+  /** Update translation for an existing committed entry. */
+  updateTranslation: (id: string, translated: string) => void;
+  /** Update correction diff for an entry. */
   correctEntry: (id: string, text: string, diff: DiffSegment[]) => void;
-  /** Clear all entries (session end). */
+  /** Clear all state (session end). */
   clear: () => void;
-  /** Get recent entries (for history/export). */
+  /** Get recent entries. */
   getRecent: (n?: number) => SubtitleEntry[];
 }
 
 export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
   entries: [],
-  current: null,
+  pending: null,
 
   addEntry: (entry) =>
     set((s) => {
-      const orig = entry.original?.slice(0, 40);
-      const trans = entry.translated?.slice(0, 40);
-      console.log(`[DBG-SUB] addEntry: id=${entry.id?.slice(0,8)} isFinal=${entry.isFinal} isReplace=${entry.isReplace} orig='${orig}' trans='${trans}' entries_before=${s.entries.length} current=${s.current?.id?.slice(0,8) ?? 'null'}`);
-
       if (entry.isFinal) {
-        // Dedup: don't add if last entry has same id
-        const lastEntry = s.entries[s.entries.length - 1];
-        if (lastEntry && lastEntry.id === entry.id) {
-          console.log(`[DBG-SUB] → 同ID更新翻译: id=${entry.id?.slice(0,8)}`);
+        // Commit: add to entries, clear pending
+        // Dedup: skip if last entry has same id or same text
+        const last = s.entries[s.entries.length - 1];
+        if (last && last.id === entry.id) {
+          // Already committed, update translation only
           const updated = [...s.entries];
-          updated[updated.length - 1] = { ...lastEntry, translated: entry.translated || lastEntry.translated };
-          return { entries: updated, current: null };
+          updated[updated.length - 1] = { ...last, translated: entry.translated || last.translated };
+          return { entries: updated, pending: null };
         }
-        // Dedup by original text — skip if last entry has same original
-        if (lastEntry && lastEntry.original === entry.original && entry.translated === entry.original) {
-          console.log(`[DBG-SUB] → 跳过重复(同原文+译文=原文): orig='${orig}'`);
-          return { entries: s.entries, current: null };
+        if (last && last.original.trim() === entry.original.trim()) {
+          // Same text, skip duplicate
+          return { entries: s.entries, pending: null };
         }
         const hist: SubtitleEntry = {
           id: entry.id, original: entry.original, translated: entry.translated || "",
           isCorrected: false, timestamp: entry.timestamp,
         };
-        console.log(`[DBG-SUB] → 新增final条目 #${s.entries.length}: orig='${orig}' trans='${trans}'`);
-        return { entries: [...s.entries, hist].slice(-100), current: null };
+        return { entries: [...s.entries, hist].slice(-100), pending: null };
+      }
+
+      // Pending update: skip if same text as last committed (dedup)
+      const last = s.entries[s.entries.length - 1];
+      if (last && last.original.trim() === entry.original.trim()) {
+        return { pending: null };
+      }
+
+      // Skip if pending has same text
+      if (s.pending && s.pending.original.trim() === entry.original.trim()) {
+        return s; // no change
       }
 
       const cur: SubtitleEntry = {
-        id: entry.id, original: entry.original, translated: entry.translated || "",
+        id: entry.id, original: entry.original, translated: "",
         isCorrected: false, timestamp: entry.timestamp,
       };
-      console.log(`[DBG-SUB] → 更新current: id=${entry.id?.slice(0,8)} orig='${orig}'`);
-      return { current: cur };
+      return { pending: cur };
+    }),
+
+  updateTranslation: (id, translated) =>
+    set((s) => {
+      // Search all entries for matching id
+      const idx = s.entries.findIndex((e) => e.id === id);
+      if (idx >= 0) {
+        const updated = [...s.entries];
+        updated[idx] = { ...updated[idx], translated };
+        return { entries: updated };
+      }
+      // Also check pending
+      if (s.pending?.id === id) {
+        return { pending: { ...s.pending, translated } };
+      }
+      return s;
     }),
 
   correctEntry: (id, text, diff) =>
@@ -76,10 +101,10 @@ export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
       entries: s.entries.map((e) =>
         e.id === id ? { ...e, translated: text, isCorrected: true, diff } : e
       ),
-      current: s.current?.id === id ? { ...s.current, translated: text, isCorrected: true, diff } : s.current,
+      pending: s.pending?.id === id ? { ...s.pending, translated: text, isCorrected: true, diff } : s.pending,
     })),
 
-  clear: () => set({ entries: [], current: null }),
+  clear: () => set({ entries: [], pending: null }),
 
   getRecent: (n = 20) => {
     const { entries } = get();

@@ -16,10 +16,11 @@ interface SubtitleLineProps {
   original: string;
   translated: string;
   isCorrected: boolean;
+  isPending?: boolean;
   diff?: DiffSegment[];
 }
 
-export function SubtitleLine({ id, original, translated, isCorrected, diff }: SubtitleLineProps) {
+export function SubtitleLine({ id, original, translated, isCorrected, isPending, diff }: SubtitleLineProps) {
   const [flash, setFlash] = useState(false);
   const { playingId, loadingId, play } = useTTSStore();
   const backendPort = useConnectionStore((s) => s.backendPort);
@@ -42,9 +43,9 @@ export function SubtitleLine({ id, original, translated, isCorrected, diff }: Su
   };
 
   return (
-    <div className={`subtitle-line ${isCorrected ? 'subtitle-line--corrected' : ''} ${flash ? 'subtitle-line--flash' : ''}`}>
+    <div className={`subtitle-line ${isCorrected ? 'subtitle-line--corrected' : ''} ${flash ? 'subtitle-line--flash' : ''} ${isPending ? 'subtitle-line--pending' : ''}`}>
       <div className="subtitle-line__original">{original}</div>
-      {translated && (
+      {translated && !isPending && (
         <div className="subtitle-line__translated-row">
           <span className="subtitle-line__translated">
             {diff && diff.length > 0 ? (
