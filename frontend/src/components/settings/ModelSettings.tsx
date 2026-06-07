@@ -3,7 +3,7 @@
  */
 import { useState } from 'react';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { LLM_PROVIDERS, type LLMProvider, type LLMConfig } from '../../types/config';
+import { LLM_PROVIDERS, type LLMConfig } from '../../types/config';
 
 type TestStatus = 'idle' | 'testing' | 'success' | 'error';
 
@@ -60,7 +60,7 @@ export function ModelSettings() {
   return (
     <div className="settings-section">
       <h3 className="settings-section__title">LLM 翻译修正</h3>
-      <p className="settings-section__desc">AI 大模型异步修正 NMT 初译结果。API Key 仅存储在本地。</p>
+      <p className="settings-section__desc">AI 大模型翻译与修正。API Key 仅存储在本地。</p>
 
       <div className="settings-row">
         <label className="settings-label">启用 LLM 修正</label>
@@ -70,7 +70,7 @@ export function ModelSettings() {
           <span className="toggle__knob" />
         </button>
       </div>
-      {!draft.enabled && <p className="settings-hint">LLM 修正已关闭，仅使用 NMT 初译。</p>}
+      {!draft.enabled && <p className="settings-hint">LLM 已关闭，翻译将返回原文。</p>}
 
       <div className={`settings-body ${!draft.enabled ? 'settings-body--disabled' : ''}`}>
         <div className="settings-row">

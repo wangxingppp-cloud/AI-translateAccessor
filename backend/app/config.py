@@ -67,7 +67,6 @@ class Settings(BaseSettings):
     asr_feature_dim: int = 80
 
     # ── Translation ───────────────────────────────────────────
-    nmt_model_path: str = "Helsinki-NLP/opus-mt-en-zh"
     llm_provider: str = "openai"        # "openai" | "anthropic" | "deepseek"
     llm_model: str = "gpt-4o"
     llm_api_key: str = ""
