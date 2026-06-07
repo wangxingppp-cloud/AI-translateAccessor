@@ -49,6 +49,22 @@
     },
     "extraResources": [
       {
+        "from": "../backend/dist/ai-translate-backend.exe",
+        "to": "backend/ai-translate-backend.exe"
+      },
+      {
+        "from": "../backend/app",
+        "to": "backend/app"
+      },
+      {
+        "from": "../backend/.env",
+        "to": "backend/.env"
+      },
+      {
+        "from": "../models",
+        "to": "models"
+      },
+      {
         "from": "resources/wasapi-capture-bin",
         "to": "wasapi-capture"
       }

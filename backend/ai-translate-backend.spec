@@ -1,21 +1,65 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app', 'app'), ('../models', 'models')]
+datas = [('app', 'app')]
 binaries = []
-hiddenimports = ['sherpa_onnx,fastapi,uvicorn,pyaudio,numpy,loguru,pydantic,pydantic_settings,sqlalchemy,onnxruntime,sentencepiece,websockets,comtypes,starlette']
+hiddenimports = [
+    # Core framework
+    'fastapi',
+    'uvicorn',
+    'uvicorn.logging',
+    'uvicorn.loops',
+    'uvicorn.loops.auto',
+    'uvicorn.protocols',
+    'uvicorn.protocols.http',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.websockets',
+    'uvicorn.protocols.websockets.auto',
+    'uvicorn.lifespan',
+    'uvicorn.lifespan.on',
+    'starlette',
+    'starlette.middleware',
+    'starlette.middleware.cors',
+    'websockets',
+    # ASR / Audio
+    'sherpa_onnx',
+    'onnxruntime',
+    'numpy',
+    'soundfile',
+    'sentencepiece',
+    # LLM
+    'openai',
+    'anthropic',
+    # TTS
+    'edge_tts',
+    # Data / Config
+    'pydantic',
+    'pydantic_settings',
+    'pydantic.deprecated',
+    'sqlalchemy',
+    'sqlalchemy.dialects',
+    'sqlalchemy.dialects.sqlite',
+    'sqlalchemy.ext',
+    'sqlalchemy.ext.asyncio',
+    # Logging
+    'loguru',
+    # Platform
+    'platformdirs',
+    # Windows COM (WASAPI)
+    'comtypes',
+]
 tmp_ret = collect_all('aiosqlite')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['launcher.py'],
-    pathex=[], 
+    pathex=[],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    hooksconfig={}, 
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[],
     noarchive=False,
