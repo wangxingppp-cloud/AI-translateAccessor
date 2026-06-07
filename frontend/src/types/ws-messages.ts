@@ -76,6 +76,7 @@ export interface SubtitleDraftMessage {
   original: string;
   translated: string;
   is_sentence_end: boolean;
+  is_replace: boolean;       // true = replace current line, false = append
   confidence: number;
   latency_ms: number;
   timestamp: number;

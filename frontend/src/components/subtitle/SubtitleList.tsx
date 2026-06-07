@@ -22,25 +22,25 @@ export interface SubtitleEntry {
 
 interface SubtitleListProps {
   entries: SubtitleEntry[];
+  current?: SubtitleEntry | null;
   placeholder?: string;
 }
 
-export function SubtitleList({ entries, placeholder }: SubtitleListProps) {
+export function SubtitleList({ entries, current, placeholder }: SubtitleListProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [userScrolledUp, setUserScrolledUp] = useState(false);
   const prevLengthRef = useRef(entries.length);
 
-  // Auto-scroll to bottom when new entries arrive
+  // Auto-scroll to bottom when new entries arrive or current updates
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    // Only auto-scroll if user hasn't scrolled up
-    if (!userScrolledUp && entries.length > prevLengthRef.current) {
+    if (!userScrolledUp) {
       container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
     }
     prevLengthRef.current = entries.length;
-  }, [entries, userScrolledUp]);
+  }, [entries, current, userScrolledUp]);
 
   // Detect user scroll
   const handleScroll = useCallback(() => {
@@ -50,7 +50,9 @@ export function SubtitleList({ entries, placeholder }: SubtitleListProps) {
     setUserScrolledUp(!atBottom);
   }, []);
 
-  if (entries.length === 0 && placeholder) {
+  const totalLen = entries.length + (current ? 1 : 0);
+
+  if (totalLen === 0 && placeholder) {
     return (
       <div className="subtitle-placeholder">
         <p className="subtitle-hint">{placeholder}</p>
@@ -69,6 +71,15 @@ export function SubtitleList({ entries, placeholder }: SubtitleListProps) {
           diff={entry.diff}
         />
       ))}
+      {current && (
+        <SubtitleLine
+          key={`current-${current.id}`}
+          original={current.original}
+          translated={current.translated}
+          isCorrected={current.isCorrected}
+          diff={current.diff}
+        />
+      )}
       {userScrolledUp && (
         <button
           type="button"
