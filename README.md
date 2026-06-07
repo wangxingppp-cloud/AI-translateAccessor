@@ -193,7 +193,7 @@ pip install -r requirements.txt
 |------|------|------|
 | Web | fastapi, uvicorn, websockets | HTTP + WebSocket 服务 |
 | 本地 ASR | sherpa-onnx | 语音识别 |
-| 本地 NMT | onnxruntime, transformers, sentencepiece | 本地翻译（opus-mt-en-zh） |
+| 本地 NMT | onnxruntime, transformers, sentencepiece, huggingface_hub | 本地翻译（opus-mt-en-zh） |
 | LLM | openai | OpenAI / DeepSeek / 自定义端点 |
 | TTS | edge-tts | Microsoft Edge TTS |
 | 数据 | pydantic, pydantic-settings, sqlalchemy, aiosqlite | 验证 + ORM |
@@ -260,14 +260,31 @@ cp .env.example .env
 ```bash
 cd ..
 
-# 下载 SenseVoice ASR 模型
+# 下载 SenseVoice ASR 模型（~230MB）
 python scripts/download_model.py
 
 # 下载流式 ASR + VAD 模型
 python scripts/download_models.py
+
+# 下载 NMT 本地翻译模型（~430MB，需要 huggingface_hub）
+python scripts/download_models.py nmt
+
+# 或一次性下载所有模型
+python scripts/download_models.py all
 ```
 
 模型下载到项目根目录的 `models/` 文件夹。
+
+**模型清单：**
+
+| 模型 | 脚本 | 大小 | 用途 |
+|------|------|------|------|
+| SenseVoice ASR | `download_model.py` | ~230MB | 多语言语音识别 |
+| Zipformer Streaming | `download_models.py asr-streaming` | ~100MB | 流式英文 ASR |
+| Silero VAD | `download_models.py vad` | ~1MB | 语音活动检测 |
+| opus-mt-en-zh NMT | `download_models.py nmt` | ~430MB | 本地 EN→ZH 翻译 |
+
+> TTS 模型（ZipVoice）和声码器（vocos）需从 sherpa-onnx 官方下载，见 `scripts/` 目录。
 
 ### 5. 前端环境配置
 

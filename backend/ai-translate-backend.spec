@@ -27,6 +27,9 @@ hiddenimports = [
     'numpy',
     'soundfile',
     'sentencepiece',
+    # NMT
+    'transformers',
+    'huggingface_hub',
     # LLM
     'openai',
     'anthropic',
