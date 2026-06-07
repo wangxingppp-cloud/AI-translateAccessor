@@ -33,7 +33,7 @@ function App() {
   const srcLang = useSettingsStore((s) => s.sourceLang);
   const tgtLang = useSettingsStore((s) => s.targetLang);
   const { wsState, backendPort, backendError, setWsState, setBackendPort, setBackendError } = useConnectionStore();
-  const { entries, current, addEntry, correctEntry, clear: clearSubtitles } = useSubtitleStore();
+  const { entries, pending, addEntry, correctEntry, clear: clearSubtitles } = useSubtitleStore();
 
   // Discover backend port from Electron
   useEffect(() => {
@@ -58,8 +58,13 @@ function App() {
       }
       console.log('[WS-IN]', msg.type, msg.type === 'subtitle_draft' ? (msg as any).original?.slice(0, 30) : '');
       if (msg.type === 'subtitle_draft') {
-        const entry = { id: msg.sequence_id, original: msg.original, translated: msg.translated, isCorrected: false, isFinal: msg.is_sentence_end, isReplace: msg.is_replace, timestamp: msg.timestamp };
-        addEntry(entry);
+        if (msg.is_sentence_end && msg.translated) {
+          // Translation update for committed entry
+          useSubtitleStore.getState().updateTranslation(msg.sequence_id, msg.translated);
+        } else {
+          const entry = { id: msg.sequence_id, original: msg.original, translated: msg.translated, isCorrected: false, isFinal: msg.is_sentence_end, timestamp: msg.timestamp };
+          addEntry(entry);
+        }
       } else if (msg.type === 'subtitle_corrected') {
         correctEntry(msg.sequence_id, msg.corrected_text, msg.diff ?? []);
       }
@@ -258,7 +263,7 @@ function App() {
           )}
           <SubtitleList
             entries={entries}
-            current={current}
+            current={pending}
             placeholder={isTranslating
               ? source === 'system' ? '正在捕获系统音频...' : '正在从麦克风录音...'
               : backendPort ? '选择音频源并开始翻译，字幕将实时显示在此区域' : '正在启动后端服务...'}

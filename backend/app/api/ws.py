@@ -29,6 +29,7 @@ from ..engines.asr.audio_capture import get_audio_capture
 from ..engines.asr.ring_buffer import RingBuffer
 from ..engines.asr.mark_processor import MarkGenerator, Mark, MarkType
 from ..engines.asr.transcription_worker import TranscriptionWorker
+from ..engines.translation.nmt_engine import get_nmt_engine
 
 router = APIRouter()
 
@@ -38,15 +39,18 @@ router = APIRouter()
 class SentenceAccumulator:
     """Accumulates ASR text revisions and detects sentence boundaries.
 
-    Mirrors the system audio _cloud_asr_loop logic:
-      - Non-final revisions update `current_text` (frontend shows as "in-progress")
-      - Punctuation or timeout triggers `commit()` → final sentence + translate
-      - Each committed sentence gets a stable `sequence_id`
+    Design based on industry patterns (Zoom/MS Translator/Google):
+      - pending: real-time updates, shows original text only
+      - committed: confirmed sentences, triggers translation
+      - Split signals: punctuation + timeout + jump detection
+      - Chinese character filtering (for English source)
+      - Minimum length + word count for commit
     """
 
     _SENT_END = set('.!?。？！…')
-    _MIN_LEN = 15
-    _TIMEOUT_S = 10.0
+    _MIN_LEN = 25          # minimum chars to commit
+    _MIN_WORDS = 3          # minimum words to commit
+    _TIMEOUT_S = 10.0       # force commit after N seconds
 
     def __init__(self):
         self.cur_text = ''
@@ -60,17 +64,22 @@ class SentenceAccumulator:
         if not new_text or new_text == self.cur_text:
             return actions
 
+        # Filter Chinese characters (echo from translation audio)
+        if self._is_chinese_heavy(new_text):
+            logger.info(f"[ACCUM] filtered Chinese: '{new_text[:40]}'")
+            return actions
+
         old_text = self.cur_text
 
         # Timeout → commit current
-        if old_text and (time.time() - self.last_time > self._TIMEOUT_S) and len(old_text.strip()) >= self._MIN_LEN:
+        if old_text and (time.time() - self.last_time > self._TIMEOUT_S) and self._can_commit(old_text):
             sid = self._commit(old_text.strip())
             actions.append(('commit', sid, old_text.strip()))
             old_text = ''
 
         # Revision: ASR changed earlier words
         if old_text and not new_text.startswith(old_text):
-            if self._has_end_punct(new_text) and len(new_text.strip()) >= self._MIN_LEN:
+            if self._has_end_punct(new_text) and self._can_commit(new_text):
                 pi = self._last_punct_pos(new_text)
                 sent = new_text[:pi + 1].strip()
                 sid = self._commit(sent)
@@ -80,7 +89,7 @@ class SentenceAccumulator:
                 self.last_time = time.time()
                 actions.append(('draft', self.cur_id, remainder))
                 return actions
-            elif len(old_text.strip()) >= self._MIN_LEN and len(new_text.strip()) < len(old_text.strip()) - 5:
+            elif self._can_commit(old_text) and len(new_text.strip()) < len(old_text.strip()) - 5:
                 sid = self._commit(old_text.strip())
                 actions.append(('commit', sid, old_text.strip()))
                 self.cur_text = new_text
@@ -104,7 +113,7 @@ class SentenceAccumulator:
         self.cur_text = new_text
         self.last_time = time.time()
 
-        if self._has_end_punct(new_text) and len(new_text.strip()) >= self._MIN_LEN:
+        if self._has_end_punct(new_text) and self._can_commit(new_text):
             pi = self._last_punct_pos(new_text)
             sent = new_text[:pi + 1].strip()
             sid = self._commit(sent)
@@ -117,6 +126,21 @@ class SentenceAccumulator:
             actions.append(('draft', self.cur_id, new_text))
 
         return actions
+
+    def _can_commit(self, text: str) -> bool:
+        """Check if text is substantial enough to commit as a sentence."""
+        t = text.strip()
+        if len(t) < self._MIN_LEN:
+            return False
+        word_count = len(t.split())
+        return word_count >= self._MIN_WORDS
+
+    def _is_chinese_heavy(self, text: str) -> bool:
+        """Check if text is primarily Chinese characters (echo from translation)."""
+        if not text:
+            return False
+        chinese = sum(1 for c in text if '一' <= c <= '鿿')
+        return chinese > len(text) * 0.3
 
     def _commit(self, sentence: str) -> str:
         sid = self.cur_id
@@ -285,32 +309,48 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
             # Cloud ASR path: feed PCM directly, no local SenseVoice
             if cloud_asr:
                 async def _do_translate(sid: str, full_text: str):
-                    """Translate full_text via LLM and send result with sid."""
+                    """Translate full_text: NMT fast → LLM refinement."""
                     try:
                         s = sessions.get(session_id)
                         if s and s.state != SessionState.LISTENING:
                             return
+
+                        # Phase 1: NMT fast translation (~100-300ms)
+                        nmt = get_nmt_engine()
+                        nmt_result = ""
+                        if nmt.ready:
+                            nmt_result = await asyncio.get_event_loop().run_in_executor(
+                                None, nmt.translate, full_text
+                            )
+                            if nmt_result:
+                                logger.info(f"[NMT] sid={sid[:6]} '{full_text[:40]}' → '{nmt_result[:40]}'")
+                                await ws.send_json(SubtitleDraft(
+                                    sequence_id=sid, original=full_text, translated=nmt_result,
+                                    is_sentence_end=True, is_replace=True,
+                                    timestamp=time.time()
+                                ).model_dump())
+
+                        # Phase 2: LLM refinement (if configured)
                         llm_cfg = _session_llm_configs.get(session_id)
-                        if not (llm_cfg and llm_cfg.enabled and llm_cfg.api_key):
-                            logger.warning(f"[DBG-TX] _do_translate: LLM未配置，跳过翻译 sid={sid[:6]}")
-                            return
-                        from ..engines.correction.corrector import LLMCorrector
-                        corrector = LLMCorrector(llm_cfg)
-                        src_l = (s.config.source_lang if s else "EN").upper()
-                        tgt_l = (s.config.target_lang if s else "ZH").upper()
-                        prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
-                        result = await corrector._call_llm(prompt)
-                        translated = result.strip() or full_text
-                        logger.info(f"[DBG-TX] _do_translate(LLM): sid={sid[:6]} '{full_text[:40]}' → '{translated[:40]}'")
-                        s = sessions.get(session_id)
-                        if s and s.state != SessionState.LISTENING:
-                            return
-                        logger.info(f"[DBG-TX] → send_json subtitle_draft: sid={sid[:6]} is_replace=True orig='{full_text[:40]}' trans='{translated[:40]}'")
-                        await ws.send_json(SubtitleDraft(
-                            sequence_id=sid, original=full_text, translated=translated,
-                            is_sentence_end=True, is_replace=True,
-                            timestamp=time.time()
-                        ).model_dump())
+                        if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                            from ..engines.correction.corrector import LLMCorrector
+                            corrector = LLMCorrector(llm_cfg)
+                            src_l = (s.config.source_lang if s else "EN").upper()
+                            tgt_l = (s.config.target_lang if s else "ZH").upper()
+                            prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
+                            result = await corrector._call_llm(prompt)
+                            translated = result.strip() or full_text
+                            logger.info(f"[LLM] sid={sid[:6]} '{full_text[:40]}' → '{translated[:40]}'")
+                            s = sessions.get(session_id)
+                            if s and s.state != SessionState.LISTENING:
+                                return
+                            await ws.send_json(SubtitleDraft(
+                                sequence_id=sid, original=full_text, translated=translated,
+                                is_sentence_end=True, is_replace=True,
+                                timestamp=time.time()
+                            ).model_dump())
+                        elif not nmt_result:
+                            logger.warning(f"[TX] sid={sid[:6]} NMT不可用且LLM未配置，跳过翻译")
                     except Exception as e:
                         logger.error(f"[CloudTX] translate error: {e}")
 

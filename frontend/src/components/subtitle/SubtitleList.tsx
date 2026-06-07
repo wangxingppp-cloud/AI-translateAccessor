@@ -79,6 +79,7 @@ export function SubtitleList({ entries, current, placeholder }: SubtitleListProp
           original={current.original}
           translated={current.translated}
           isCorrected={current.isCorrected}
+          isPending={true}
           diff={current.diff}
         />
       )}

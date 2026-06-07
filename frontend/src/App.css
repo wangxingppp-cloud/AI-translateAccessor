@@ -1609,6 +1609,12 @@ body {
   animation: flash-correction 2s var(--ease-out);
 }
 
+/* ── Pending (in-progress) sentence ────────────────────────── */
+.subtitle-line--pending {
+  opacity: 0.7;
+  border-left: 2px solid var(--color-accent, #6366f1);
+}
+
 /* ── Diff text segments ────────────────────────────────────── */
 .diff-text__del {
   text-decoration: line-through;
