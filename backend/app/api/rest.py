@@ -2,6 +2,7 @@
 REST API routes — translation history, glossary, health.
 """
 from fastapi import APIRouter, Depends, Query
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.database import get_session
@@ -19,16 +20,61 @@ async def health_check():
     return {"status": "ok", "version": "0.1.0"}
 
 
+@router.get("/debug/db-check")
+async def debug_db_check():
+    """Debug endpoint: directly query SQLite to verify data."""
+    from ..db.database import get_session as get_db_session
+    from ..db.models import Session, Subtitle
+    from sqlalchemy import select, func, text as sql_text
+
+    db = await get_db_session()
+    try:
+        # Count sessions
+        result = await db.execute(select(func.count()).select_from(Session))
+        session_count = result.scalar()
+
+        # Count subtitles
+        result = await db.execute(select(func.count()).select_from(Subtitle))
+        subtitle_count = result.scalar()
+
+        # List all sessions
+        result = await db.execute(select(Session).order_by(Session.started_at.desc()).limit(10))
+        sessions = []
+        for s in result.scalars().all():
+            sessions.append({
+                "id": s.id, "name": s.name, "status": s.status,
+                "total_sentences": s.total_sentences, "started_at": s.started_at,
+            })
+
+        # Get DB file path
+        from ..config import get_settings
+        db_url = get_settings().database_url
+
+        return {
+            "database_url": db_url,
+            "session_count": session_count,
+            "subtitle_count": subtitle_count,
+            "recent_sessions": sessions,
+        }
+    finally:
+        await db.close()
+
+
 # ── History — sessions ──────────────────────────────────────
 
 @router.get("/sessions")
 async def list_sessions(svc: HistoryService = Depends(_svc),
                         limit: int = Query(20, ge=1, le=100),
                         offset: int = Query(0, ge=0)):
+    logger.info(f"[REST] GET /sessions limit={limit} offset={offset}")
     sessions = await svc.list_sessions(limit=limit, offset=offset)
-    return {
-        "sessions": [{
+    logger.info(f"[REST] Found {len(sessions)} sessions")
+    result = []
+    for s in sessions:
+        logger.debug(f"[REST]   session id={s.id} name={s.name!r} status={s.status} sentences={s.total_sentences}")
+        result.append({
             "id": s.id,
+            "name": s.name or "",
             "source_lang": s.source_lang,
             "target_lang": s.target_lang,
             "asr_provider": s.asr_provider,
@@ -36,8 +82,28 @@ async def list_sessions(svc: HistoryService = Depends(_svc),
             "ended_at": s.ended_at,
             "status": s.status,
             "total_sentences": s.total_sentences,
-        } for s in sessions]
-    }
+        })
+    return {"sessions": result}
+
+
+@router.post("/sessions")
+async def create_session(data: dict, svc: HistoryService = Depends(_svc)):
+    """Save a completed translation session with subtitles."""
+    subtitle_count = len(data.get("subtitles", []))
+    logger.info(f"[REST] POST /sessions name={data.get('name')!r} subtitles={subtitle_count} "
+                f"src={data.get('source_lang')} tgt={data.get('target_lang')}")
+    try:
+        s = await svc.create_session_with_subtitles(
+            name=data.get("name", "未命名"),
+            source_lang=data.get("source_lang", "en"),
+            target_lang=data.get("target_lang", "zh"),
+            subtitles=data.get("subtitles", []),
+        )
+        logger.info(f"[REST] POST /sessions → saved id={s.id} sentences={s.total_sentences}")
+        return {"id": s.id, "status": "saved", "total_sentences": s.total_sentences}
+    except Exception as e:
+        logger.error(f"[REST] POST /sessions FAILED: {e}", exc_info=True)
+        raise
 
 
 @router.get("/sessions/{session_id}/subtitles")

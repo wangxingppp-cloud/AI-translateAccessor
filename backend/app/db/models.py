@@ -13,6 +13,7 @@ class Session(Base):
     __tablename__ = "sessions"
 
     id = Column(String, primary_key=True, default=gen_id)
+    name = Column(String, default="")           # user-defined session name
     source_lang = Column(String, default="en")
     target_lang = Column(String, default="zh")
     audio_source = Column(String, default="microphone")
