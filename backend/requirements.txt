@@ -10,6 +10,9 @@ sherpa-onnx>=1.10
 openai>=1.50
 # anthropic  (uncomment when Claude integration is added)
 
+# TTS
+edge-tts>=6.1
+
 # Data & validation
 pydantic>=2.5
 pydantic-settings>=2.1

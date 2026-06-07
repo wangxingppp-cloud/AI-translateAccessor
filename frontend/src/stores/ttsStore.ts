@@ -7,6 +7,7 @@
  */
 import { create } from 'zustand';
 import { fetchTTS } from '../services/tts-client';
+import { useSettingsStore } from './settingsStore';
 
 // Module-level AudioContext (shared, lazy-init)
 let audioCtx: AudioContext | null = null;
@@ -55,7 +56,8 @@ export const useTTSStore = create<TTSStore>((set, get) => ({
     set({ loadingId: id, playingId: null });
 
     try {
-      const wavBuf = await fetchTTS(text, backendPort);
+      const ttsConfig = useSettingsStore.getState().tts;
+      const wavBuf = await fetchTTS(text, backendPort, ttsConfig);
       const ctx = getAudioCtx();
       const audioBuf = await ctx.decodeAudioData(wavBuf.slice(0));
 

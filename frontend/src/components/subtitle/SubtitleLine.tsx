@@ -9,6 +9,7 @@ import { Volume2, Loader2, VolumeX } from 'lucide-react';
 import type { DiffSegment } from '../../types/ws-messages';
 import { useTTSStore } from '../../stores/ttsStore';
 import { useConnectionStore } from '../../stores/connectionStore';
+import { useSettingsStore } from '../../stores/settingsStore';
 
 interface SubtitleLineProps {
   id: string;
@@ -22,6 +23,7 @@ export function SubtitleLine({ id, original, translated, isCorrected, diff }: Su
   const [flash, setFlash] = useState(false);
   const { playingId, loadingId, play } = useTTSStore();
   const backendPort = useConnectionStore((s) => s.backendPort);
+  const ttsEnabled = useSettingsStore((s) => s.tts.enabled);
 
   const isPlaying = playingId === id;
   const isLoading = loadingId === id;
@@ -51,22 +53,24 @@ export function SubtitleLine({ id, original, translated, isCorrected, diff }: Su
               translated
             )}
           </span>
-          <button
-            type="button"
-            className={`tts-btn ${isPlaying ? 'tts-btn--playing' : ''}`}
-            onClick={handleTTS}
-            disabled={isLoading}
-            title={isPlaying ? '停止朗读' : '朗读译文'}
-            aria-label={isPlaying ? '停止朗读' : '朗读译文'}
-          >
-            {isLoading ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : isPlaying ? (
-              <VolumeX size={14} />
-            ) : (
-              <Volume2 size={14} />
-            )}
-          </button>
+          {ttsEnabled && (
+            <button
+              type="button"
+              className={`tts-btn ${isPlaying ? 'tts-btn--playing' : ''}`}
+              onClick={handleTTS}
+              disabled={isLoading}
+              title={isPlaying ? '停止朗读' : '朗读译文'}
+              aria-label={isPlaying ? '停止朗读' : '朗读译文'}
+            >
+              {isLoading ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : isPlaying ? (
+                <VolumeX size={14} />
+              ) : (
+                <Volume2 size={14} />
+              )}
+            </button>
+          )}
         </div>
       )}
     </div>

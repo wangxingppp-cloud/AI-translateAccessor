@@ -973,6 +973,17 @@ body {
   text-transform: uppercase;
 }
 
+.provider-card__badge--dev {
+  background: var(--color-warning);
+  color: #0A0A0F;
+}
+
+.provider-card--disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 /* ── Language Selection ────────────────────────────────────── */
 .lang-select-row {
   display: flex;
