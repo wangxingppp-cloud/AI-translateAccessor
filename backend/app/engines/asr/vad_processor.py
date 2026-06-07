@@ -25,9 +25,10 @@ class VadProcessor:
         s = samples.astype(np.float32)
         rms = np.sqrt(np.mean(s ** 2))
         self._total += 1
-        if self._total <= 5 or self._total % 50 == 0:
-            logger.info(f"VAD #{self._total}: rms={rms:.4f} speech={rms>=SPEECH_THRESHOLD}")
-        return rms >= SPEECH_THRESHOLD
+        is_speech = rms >= SPEECH_THRESHOLD
+        if self._total <= 10 or self._total % 50 == 0:
+            logger.info(f"[DBG-TRACK] VAD #{self._total}: rms={rms:.5f} threshold={SPEECH_THRESHOLD} → {'SPEECH' if is_speech else 'silence'}")
+        return is_speech
 
     def reset(self) -> None:
         self._total = 0

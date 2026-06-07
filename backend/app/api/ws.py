@@ -5,8 +5,7 @@ The /ws/translate endpoint is the main pipeline for real-time translation:
   - Client sends binary PCM audio chunks + JSON control messages
   - Server sends subtitle JSON (draft → corrected → final) + status + errors
 
-Pipeline:  PCM bytes → float32 → VAD → ASR → NMT → subtitle_draft → client
-                                                  └→ LLM correct → subtitle_corrected (async)
+Pipeline:  PCM bytes → float32 → VAD → ASR → LLM translate → subtitle_draft → client
 
 Protocol frames are defined in models/subtitle.py and models/session.py.
 """
@@ -23,7 +22,6 @@ from ..models.subtitle import (
     StatusMessage, ErrorMessage, SubtitleDraft, SubtitleFinal, SubtitleCorrected,
 )
 from ..models.glossary import Term
-from ..engines.translation.nmt_engine import get_nmt_engine
 from ..engines.translation.context_manager import TranslationContext
 from ..engines.correction.corrector import LLMCorrector, LLMConfig
 from ..engines.asr.cloud_asr import AsrEngineConfig, create_cloud_asr, StreamingASR
@@ -34,6 +32,111 @@ from ..engines.asr.transcription_worker import TranscriptionWorker
 
 router = APIRouter()
 
+
+# ── Sentence accumulator — shared by mic and system audio paths ──
+
+class SentenceAccumulator:
+    """Accumulates ASR text revisions and detects sentence boundaries.
+
+    Mirrors the system audio _cloud_asr_loop logic:
+      - Non-final revisions update `current_text` (frontend shows as "in-progress")
+      - Punctuation or timeout triggers `commit()` → final sentence + translate
+      - Each committed sentence gets a stable `sequence_id`
+    """
+
+    _SENT_END = set('.!?。？！…')
+    _MIN_LEN = 15
+    _TIMEOUT_S = 10.0
+
+    def __init__(self):
+        self.cur_text = ''
+        self.cur_id = 's0'
+        self.sent_num = 0
+        self.last_time = time.time()
+
+    def update(self, new_text: str):
+        """Feed a new ASR revision. Returns list of (action, ...) tuples."""
+        actions = []
+        if not new_text or new_text == self.cur_text:
+            return actions
+
+        old_text = self.cur_text
+
+        # Timeout → commit current
+        if old_text and (time.time() - self.last_time > self._TIMEOUT_S) and len(old_text.strip()) >= self._MIN_LEN:
+            sid = self._commit(old_text.strip())
+            actions.append(('commit', sid, old_text.strip()))
+            old_text = ''
+
+        # Revision: ASR changed earlier words
+        if old_text and not new_text.startswith(old_text):
+            if self._has_end_punct(new_text) and len(new_text.strip()) >= self._MIN_LEN:
+                pi = self._last_punct_pos(new_text)
+                sent = new_text[:pi + 1].strip()
+                sid = self._commit(sent)
+                actions.append(('commit', sid, sent))
+                remainder = new_text[pi + 1:].strip()
+                self.cur_text = remainder
+                self.last_time = time.time()
+                actions.append(('draft', self.cur_id, remainder))
+                return actions
+            elif len(old_text.strip()) >= self._MIN_LEN and len(new_text.strip()) < len(old_text.strip()) - 5:
+                sid = self._commit(old_text.strip())
+                actions.append(('commit', sid, old_text.strip()))
+                self.cur_text = new_text
+                self.last_time = time.time()
+                actions.append(('draft', self.cur_id, new_text))
+                return actions
+            else:
+                self.cur_text = new_text
+                self.last_time = time.time()
+                actions.append(('draft', self.cur_id, new_text))
+                return actions
+
+        # Text shrank
+        if len(new_text) < len(old_text):
+            self.cur_text = new_text
+            self.last_time = time.time()
+            actions.append(('draft', self.cur_id, new_text))
+            return actions
+
+        # Text grew
+        self.cur_text = new_text
+        self.last_time = time.time()
+
+        if self._has_end_punct(new_text) and len(new_text.strip()) >= self._MIN_LEN:
+            pi = self._last_punct_pos(new_text)
+            sent = new_text[:pi + 1].strip()
+            sid = self._commit(sent)
+            actions.append(('commit', sid, sent))
+            remainder = new_text[pi + 1:].strip()
+            if remainder:
+                self.cur_text = remainder
+                actions.append(('draft', self.cur_id, remainder))
+        else:
+            actions.append(('draft', self.cur_id, new_text))
+
+        return actions
+
+    def _commit(self, sentence: str) -> str:
+        sid = self.cur_id
+        self.sent_num += 1
+        self.cur_id = f's{self.sent_num}'
+        self.cur_text = ''
+        self.last_time = time.time()
+        logger.info(f"[ACCUM] commit [{sid}] '{sentence[:60]}' (total={self.sent_num})")
+        return sid
+
+    @classmethod
+    def _has_end_punct(cls, text: str) -> bool:
+        t = text.rstrip()
+        return bool(t) and t[-1] in cls._SENT_END
+
+    @classmethod
+    def _last_punct_pos(cls, text: str) -> int:
+        return max(text.rfind(c) for c in cls._SENT_END)
+
+
 # ── Per-session state ───────────────────────────────────────────
 
 _session_contexts: dict[str, TranslationContext] = {}
@@ -41,6 +144,7 @@ _session_llm_configs: dict[str, LLMConfig] = {}
 _session_cloud_asr: dict[str, StreamingASR] = {}
 _session_asr_configs: dict[str, AsrEngineConfig] = {}
 _session_systems: dict[str, tuple[RingBuffer, MarkGenerator, TranscriptionWorker]] = {}
+_session_accumulators: dict[str, SentenceAccumulator] = {}
 
 
 def _get_context(session_id: str, create: bool = False) -> TranslationContext | None:
@@ -60,6 +164,7 @@ def _cleanup_session(session_id: str) -> None:
     _session_llm_configs.pop(session_id, None)
     _session_cloud_asr.pop(session_id, None)
     _session_asr_configs.pop(session_id, None)
+    _session_accumulators.pop(session_id, None)
     try: get_audio_capture().stop()
     except: pass
 
@@ -162,27 +267,27 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
             # Cloud ASR path: feed PCM directly, no local SenseVoice
             if cloud_asr:
                 async def _do_translate(sid: str, full_text: str):
-                    """Translate full_text and send result with sid."""
+                    """Translate full_text via LLM and send result with sid."""
                     try:
                         s = sessions.get(session_id)
                         if s and s.state != SessionState.LISTENING:
                             return
                         llm_cfg = _session_llm_configs.get(session_id)
-                        if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
-                            from ..engines.correction.corrector import LLMCorrector
-                            corrector = LLMCorrector(llm_cfg)
-                            src_l = (s.config.source_lang if s else "EN").upper()
-                            tgt_l = (s.config.target_lang if s else "ZH").upper()
-                            prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
-                            result = await corrector._call_llm(prompt)
-                            translated = result.strip() or full_text
-                        else:
-                            nmt = get_nmt_engine()
-                            t = await nmt.translate(full_text)
-                            translated = t.text
+                        if not (llm_cfg and llm_cfg.enabled and llm_cfg.api_key):
+                            logger.warning(f"[DBG-TX] _do_translate: LLM未配置，跳过翻译 sid={sid[:6]}")
+                            return
+                        from ..engines.correction.corrector import LLMCorrector
+                        corrector = LLMCorrector(llm_cfg)
+                        src_l = (s.config.source_lang if s else "EN").upper()
+                        tgt_l = (s.config.target_lang if s else "ZH").upper()
+                        prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
+                        result = await corrector._call_llm(prompt)
+                        translated = result.strip() or full_text
+                        logger.info(f"[DBG-TX] _do_translate(LLM): sid={sid[:6]} '{full_text[:40]}' → '{translated[:40]}'")
                         s = sessions.get(session_id)
                         if s and s.state != SessionState.LISTENING:
                             return
+                        logger.info(f"[DBG-TX] → send_json subtitle_draft: sid={sid[:6]} is_replace=True orig='{full_text[:40]}' trans='{translated[:40]}'")
                         await ws.send_json(SubtitleDraft(
                             sequence_id=sid, original=full_text, translated=translated,
                             is_sentence_end=True, is_replace=True,
@@ -208,7 +313,7 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
                     last_time = time.time()
 
                     def _send(text, sid, is_final):
-                        logger.info(f"[SEND] sid={sid} final={is_final} text='{text[:60]}'")
+                        logger.info(f"[DBG-TX] _send(ASR): sid={sid} final={is_final} text='{text[:60]}'")
                         return SubtitleDraft(
                             sequence_id=sid, original=text, translated='',
                             is_sentence_end=is_final, is_replace=False,
@@ -366,9 +471,8 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
                         except Exception:
                             translated = original
                     else:
-                        nmt = get_nmt_engine()
-                        t = await nmt.translate(original)
-                        translated = t.text
+                        logger.warning(f"[TX] LLM未配置，返回原文")
+                        translated = original
                     seq_id = str(uuid.uuid4())
                     ctx = _get_context(session_id)
                     if ctx and translated:
@@ -485,65 +589,90 @@ async def _process_control_message(session_id: str, ws: WebSocket, text: str) ->
 
 
 async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> None:
-    """Process audio chunk through ASR + NMT pipeline."""
+    """Process audio chunk through ASR + LLM pipeline."""
     _n = getattr(_process_audio_chunk, '_n', 0) + 1
     _process_audio_chunk._n = _n
 
     try:
         session = sessions.require(session_id)
     except KeyError:
-        if _n <= 3: logger.error("[AUDIO] NO SESSION")
+        if _n <= 3: logger.error("[DBG-TRACK] ③后端收到 WS bytes — 但 NO SESSION")
         return
 
     if session.state != SessionState.LISTENING:
-        if _n <= 3: logger.warning(f"[AUDIO] Wrong state: {session.state}")
+        if _n <= 3: logger.warning(f"[DBG-TRACK] ③后端收到 WS bytes — 但 state={session.state} (非 LISTENING)")
         return
 
-    if _n <= 5:
-        logger.info(f"[AUDIO] #{_n}: {len(data)}B, state={session.state}")
+    if _n <= 10 or _n % 50 == 0:
+        logger.info(f"[DBG-TRACK] ③后端收到 WS #{_n}: {len(data)}B, state={session.state}")
 
     sessions.record_audio_chunk(session_id)
 
     cloud_asr = _session_cloud_asr.get(session_id)
     if cloud_asr:
         try:
-            logger.info(f"[CloudASR:mic] process_chunk called, pcm={len(data)}B")
+            logger.info(f"[DBG-TRACK] ④走云端ASR分支, pcm={len(data)}B")
+            # Get or create per-session accumulator
+            accum = _session_accumulators.get(session_id)
+            if accum is None:
+                accum = SentenceAccumulator()
+                _session_accumulators[session_id] = accum
+
             async for asr_result in cloud_asr.process_chunk(data):
-                logger.info(f"[CloudASR] session={session_id} text='{asr_result.text}' is_final={asr_result.is_final}")
-                if asr_result.text:
-                    sessions.record_sentence(session_id)
-                    seq_id = str(uuid.uuid4())
-                    # Send original immediately
-                    await ws.send_json(
-                        SubtitleDraft(sequence_id=seq_id, original=asr_result.text, translated="",
-                                      is_sentence_end=asr_result.is_final, confidence=asr_result.confidence,
-                                      timestamp=asr_result.timestamp).model_dump()
-                    )
-                    # Translate in background
-                    _orig = asr_result.text
-                    async def _bg_translate():
-                        try:
-                            s = sessions.get(session_id)
-                            llm_cfg = _session_llm_configs.get(session_id)
-                            if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                logger.info(f"[DBG-TRACK] ⑤云端ASR结果: text='{asr_result.text}' is_final={asr_result.is_final}")
+                if not asr_result.text:
+                    continue
+
+                # Feed into accumulator — handles dedup, revision, sentence boundary
+                actions = accum.update(asr_result.text)
+
+                for action in actions:
+                    kind = action[0]
+
+                    if kind == 'draft':
+                        # In-progress revision: update "current" line on frontend
+                        _, sid, text = action
+                        logger.info(f"[DBG-TX] mic draft: sid={sid} text='{text[:50]}'")
+                        await ws.send_json(
+                            SubtitleDraft(sequence_id=sid, original=text, translated="",
+                                          is_sentence_end=False, timestamp=time.time()).model_dump()
+                        )
+
+                    elif kind == 'commit':
+                        # Sentence committed: add to history + translate
+                        _, sid, text = action
+                        sessions.record_sentence(session_id)
+                        logger.info(f"[DBG-TX] mic commit: sid={sid} text='{text[:50]}'")
+                        # Send final ASR result
+                        await ws.send_json(
+                            SubtitleDraft(sequence_id=sid, original=text, translated="",
+                                          is_sentence_end=True, timestamp=time.time()).model_dump()
+                        )
+                        # Translate via LLM
+                        async def _bg_translate(_sid=sid, _text=text):
+                            try:
+                                s = sessions.get(session_id)
+                                llm_cfg = _session_llm_configs.get(session_id)
+                                if not (llm_cfg and llm_cfg.enabled and llm_cfg.api_key):
+                                    logger.warning(f"[DBG-TX] mic翻译: LLM未配置，跳过 sid={_sid[:6]}")
+                                    return
                                 from ..engines.correction.corrector import LLMCorrector
                                 corrector = LLMCorrector(llm_cfg)
                                 src_l = (s.config.source_lang if s else "EN").upper()
                                 tgt_l = (s.config.target_lang if s else "ZH").upper()
-                                prompt = f"Translate {src_l} to {tgt_l}:\n\n{_orig}\n\n{tgt_l}:"
+                                prompt = f"Translate {src_l} to {tgt_l}:\n\n{_text}\n\n{tgt_l}:"
                                 result = await corrector._call_llm(prompt)
-                                translated = result.strip() or _orig
-                            else:
-                                nmt_engine = get_nmt_engine()
-                                translation = await nmt_engine.translate(_orig)
-                                translated = translation.text
-                            await ws.send_json(
-                                SubtitleDraft(sequence_id=seq_id, original=_orig, translated=translated,
-                                              is_sentence_end=True, timestamp=time.time()).model_dump()
-                            )
-                        except Exception as e:
-                            logger.error(f"[CloudASR] translate error: {e}")
-                    asyncio.ensure_future(_bg_translate())
+                                translated = result.strip() or _text
+                                logger.info(f"[DBG-TX] mic翻译(LLM): sid={_sid[:6]} '{_text[:40]}' → '{translated[:40]}'")
+                                await ws.send_json(
+                                    SubtitleDraft(sequence_id=_sid, original=_text, translated=translated,
+                                                  is_sentence_end=True, is_replace=True,
+                                                  timestamp=time.time()).model_dump()
+                                )
+                            except Exception as e:
+                                logger.error(f"[DBG-TX] mic翻译异常: {e}")
+                        asyncio.ensure_future(_bg_translate())
+
         except Exception as e:
             logger.warning(f"Cloud ASR error [{session_id}]: {e}", exc_info=True)
         return
@@ -555,6 +684,7 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
     handlers = getattr(_process_audio_chunk, '_handlers', {})
     if session_id not in handlers:
         handlers[session_id] = StreamHandler()
+        logger.info(f"[DBG-TRACK] ④走本地ASR分支 (StreamHandler 新建)")
     handler = handlers.get(session_id)
     if not handler:
         return
@@ -562,16 +692,18 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
     try:
         async for asr_result in handler.process_chunk(data):
             if asr_result.text:
+                logger.info(f"[DBG-TRACK] ⑤本地ASR结果: text='{asr_result.text}' is_final={asr_result.is_final}")
                 sessions.record_sentence(session_id)
 
-                # Translation: LLM if enabled, else NMT
+                # Translation via LLM
                 s = sessions.get(session_id)
                 glossary = [t.model_dump() for t in s.config.glossary_terms] if s else []
                 llm_cfg = _session_llm_configs.get(session_id)
+                tx_backend = "llm"
+                latency_ms = 0
                 if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
                     from ..engines.correction.corrector import LLMCorrector
                     corrector = LLMCorrector(llm_cfg)
-                    # Use LLM for full translation (not just correction)
                     src = sessions.get(session_id).config.source_lang if session_id else "EN".upper() if session and session.config else 'EN'
                     tgt = sessions.get(session_id).config.target_lang if session_id else "ZH".upper() if session and session.config else 'ZH'
                     prompt = f"""Translate the following {src} text to {tgt}.
@@ -581,12 +713,10 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
 {tgt}:"""
                     result = await corrector._call_llm(prompt)
                     translated_text = result.strip() or asr_result.text
-                    nmt_latency = 0
                 else:
-                    nmt_engine = get_nmt_engine()
-                    translation = await nmt_engine.translate(asr_result.text)
-                    translated_text = translation.text
-                    nmt_latency = translation.latency_ms
+                    logger.warning(f"[DBG-TX] 本地ASR: LLM未配置，返回原文")
+                    translated_text = asr_result.text
+                    tx_backend = "none"
 
                 # Store context for future LLM correction
                 seq_id = str(uuid.uuid4())
@@ -600,6 +730,7 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                     )
 
                 # Send draft to client
+                logger.info(f"[DBG-TRACK] ⑥翻译完成: \"{asr_result.text[:50]}\" → \"{translated_text[:50]}\" backend={tx_backend}")
                 logger.info(f"[SEND] subtitle_draft: \"{asr_result.text[:50]}\" → \"{translated_text[:50]}\"")
                 await ws.send_json(
                     SubtitleDraft(
@@ -608,7 +739,7 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                         translated=translated_text,
                         is_sentence_end=asr_result.is_final,
                         confidence=asr_result.confidence,
-                        latency_ms=round(nmt_latency),
+                        latency_ms=round(latency_ms),
                         timestamp=asr_result.timestamp,
                     ).model_dump()
                 )

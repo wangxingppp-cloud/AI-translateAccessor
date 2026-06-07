@@ -37,19 +37,29 @@ export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
 
   addEntry: (entry) =>
     set((s) => {
+      const orig = entry.original?.slice(0, 40);
+      const trans = entry.translated?.slice(0, 40);
+      console.log(`[DBG-SUB] addEntry: id=${entry.id?.slice(0,8)} isFinal=${entry.isFinal} isReplace=${entry.isReplace} orig='${orig}' trans='${trans}' entries_before=${s.entries.length} current=${s.current?.id?.slice(0,8) ?? 'null'}`);
+
       if (entry.isFinal) {
         // Dedup: don't add if last entry has same id
         const lastEntry = s.entries[s.entries.length - 1];
         if (lastEntry && lastEntry.id === entry.id) {
-          // Update translation if provided
+          console.log(`[DBG-SUB] → 同ID更新翻译: id=${entry.id?.slice(0,8)}`);
           const updated = [...s.entries];
           updated[updated.length - 1] = { ...lastEntry, translated: entry.translated || lastEntry.translated };
           return { entries: updated, current: null };
+        }
+        // Dedup by original text — skip if last entry has same original
+        if (lastEntry && lastEntry.original === entry.original && entry.translated === entry.original) {
+          console.log(`[DBG-SUB] → 跳过重复(同原文+译文=原文): orig='${orig}'`);
+          return { entries: s.entries, current: null };
         }
         const hist: SubtitleEntry = {
           id: entry.id, original: entry.original, translated: entry.translated || "",
           isCorrected: false, timestamp: entry.timestamp,
         };
+        console.log(`[DBG-SUB] → 新增final条目 #${s.entries.length}: orig='${orig}' trans='${trans}'`);
         return { entries: [...s.entries, hist].slice(-100), current: null };
       }
 
@@ -57,6 +67,7 @@ export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
         id: entry.id, original: entry.original, translated: entry.translated || "",
         isCorrected: false, timestamp: entry.timestamp,
       };
+      console.log(`[DBG-SUB] → 更新current: id=${entry.id?.slice(0,8)} orig='${orig}'`);
       return { current: cur };
     }),
 

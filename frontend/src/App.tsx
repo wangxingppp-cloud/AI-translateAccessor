@@ -53,6 +53,9 @@ function App() {
     const ws = new WebSocketClient({ url });
     ws.onStateChange(setWsState);
     ws.onMessage((msg: ServerMessage) => {
+      if (msg.type === 'subtitle_draft') {
+        console.log(`[DBG-TRACK] ⑦前端收到字幕: original='${(msg as any).original?.slice(0, 40)}' translated='${(msg as any).translated?.slice(0, 40)}' is_sentence_end=${(msg as any).is_sentence_end}`);
+      }
       console.log('[WS-IN]', msg.type, msg.type === 'subtitle_draft' ? (msg as any).original?.slice(0, 30) : '');
       if (msg.type === 'subtitle_draft') {
         const entry = { id: msg.sequence_id, original: msg.original, translated: msg.translated, isCorrected: false, isFinal: msg.is_sentence_end, isReplace: msg.is_replace, timestamp: msg.timestamp };
@@ -68,8 +71,14 @@ function App() {
 
   // Audio capture — buffer ~200ms chunks for low-latency streaming
   const chunkBuf = useRef<ArrayBuffer[]>([]);
+  const chunkCount = useRef(0);
+  const sendCount = useRef(0);
   const { state: audioState, startCapture, stopCapture, switchSource, error: audioError, clearError } = useAudioCapture({
     onChunk: (chunk) => {
+      chunkCount.current++;
+      if (chunkCount.current <= 5 || chunkCount.current % 50 === 0) {
+        console.log(`[DBG-TRACK] ①前端采集 chunk #${chunkCount.current}: ${chunk.byteLength}B`);
+      }
       chunkBuf.current.push(chunk);
       // Send merged ~200ms (small chunks, backend handles buffering)
       if (chunkBuf.current.length >= 3) {
@@ -79,6 +88,10 @@ function App() {
         for (const c of chunkBuf.current) {
           merged.set(new Uint8Array(c), off);
           off += c.byteLength;
+        }
+        sendCount.current++;
+        if (sendCount.current <= 5 || sendCount.current % 20 === 0) {
+          console.log(`[DBG-TRACK] ②前端发送 WS #${sendCount.current}: ${merged.byteLength}B, wsState=${wsRef.current ? 'exists' : 'null'}`);
         }
         wsRef.current?.sendAudioChunk(merged.buffer);
         chunkBuf.current = [];
