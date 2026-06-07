@@ -1,6 +1,7 @@
 # AI 同声传译助手
-
 AI 同声传译助手 — 实时语音识别、翻译与字幕显示桌面应用。帮助用户在观看外语音视频、参加线上会议时获得实时翻译字幕。
+
+演示视频链接：【ai实时翻译录制】https://www.bilibili.com/video/BV1zJEh6vEyQ?vd_source=f910472429de506419647e40a886d42d
 
 ## 功能特性
 
@@ -68,7 +69,6 @@ AI-translateAccessor/
 │   │   └── utils/
 │   │       ├── logger.py             # Loguru 日志配置
 │   │       └── metrics.py            # 管道延迟指标
-│   ├── models/                       # 本地 AI 模型（NMT 等）
 │   └── tests/                        # 测试包
 │
 ├── frontend/                         # React + Electron 前端
@@ -106,7 +106,12 @@ AI-translateAccessor/
 │       ├── stores/                   # Zustand: connection, subtitle, settings, tts
 │       └── types/                    # TypeScript 类型定义
 │
-├── models/                           # 本地 AI 模型（ASR / TTS / VAD）
+├── models/                           # 本地 AI 模型（ASR / TTS / VAD / NMT）
+│   ├── sherpa-onnx-paraformer/       # SenseVoice ASR 模型
+│   ├── sherpa-onnx-zipvoice-.../     # ZipVoice TTS 模型
+│   ├── silero-vad/                   # VAD 语音活动检测
+│   ├── vocos_24khz.onnx             # TTS 声码器
+│   └── nmt-en-zh/                   # opus-mt-en-zh NMT 翻译模型（ONNX）
 ├── scripts/                          # 模型下载脚本
 └── data/                             # 运行时数据（SQLite 等）
 ```
