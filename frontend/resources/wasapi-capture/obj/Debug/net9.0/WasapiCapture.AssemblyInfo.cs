@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("wasapi-capture")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+01f6652d72335ba0ea2bd0ce3ec2cef6a1018300")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+6fa77b5f849d28322dedc129328263aa774eea6a")]
 [assembly: System.Reflection.AssemblyProductAttribute("wasapi-capture")]
 [assembly: System.Reflection.AssemblyTitleAttribute("wasapi-capture")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
