@@ -3,10 +3,10 @@
  */
 import { useState, useEffect } from 'react';
 import { X, Search } from 'lucide-react';
-import type { SubtitleEntry } from '../subtitle';
 
 interface SessionInfo {
   id: string;
+  name: string;
   source_lang: string;
   target_lang: string;
   asr_provider: string;
@@ -25,6 +25,16 @@ interface SearchResult {
   created_at: number;
 }
 
+/** Subtitle as returned by GET /api/sessions/{id}/subtitles */
+interface SubtitleRecord {
+  id: string;
+  sequence_id: string;
+  original_text: string;
+  translated_text: string;
+  is_corrected: boolean;
+  created_at: number;
+}
+
 interface HistoryPanelProps {
   open: boolean;
   onClose: () => void;
@@ -36,7 +46,7 @@ export function HistoryPanel({ open, onClose, backendPort }: HistoryPanelProps) 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [sessionSubtitles, setSessionSubtitles] = useState<SubtitleEntry[]>([]);
+  const [sessionSubtitles, setSessionSubtitles] = useState<SubtitleRecord[]>([]);
   const [loading, setLoading] = useState(false);
 
   const apiBase = backendPort ? `http://127.0.0.1:${backendPort}/api` : '';
@@ -44,17 +54,30 @@ export function HistoryPanel({ open, onClose, backendPort }: HistoryPanelProps) 
   // Load sessions on open
   useEffect(() => {
     if (open && apiBase) {
+      console.log('[HISTORY] Loading sessions from', `${apiBase}/sessions`);
       fetch(`${apiBase}/sessions`)
-        .then((r) => r.json())
-        .then((d) => setSessions(d.sessions || []));
+        .then((r) => {
+          console.log('[HISTORY] GET /sessions status:', r.status);
+          return r.json();
+        })
+        .then((d) => {
+          console.log('[HISTORY] Sessions response:', JSON.stringify(d).slice(0, 500));
+          console.log('[HISTORY] Session count:', d.sessions?.length ?? 0);
+          setSessions(d.sessions || []);
+        })
+        .catch((err) => console.error('[HISTORY] GET /sessions error:', err));
     }
   }, [open, apiBase]);
 
   const loadSession = async (id: string) => {
     setSelectedSession(id);
     setLoading(true);
+    console.log('[HISTORY] Loading session subtitles:', id);
     const resp = await fetch(`${apiBase}/sessions/${id}/subtitles`);
     const data = await resp.json();
+    console.log('[HISTORY] Subtitles response:', JSON.stringify(data).slice(0, 800));
+    console.log('[HISTORY] First subtitle keys:', data.subtitles?.[0] ? Object.keys(data.subtitles[0]) : 'none');
+    console.log('[HISTORY] First subtitle raw:', JSON.stringify(data.subtitles?.[0]));
     setSessionSubtitles(data.subtitles || []);
     setLoading(false);
   };
@@ -126,9 +149,10 @@ export function HistoryPanel({ open, onClose, backendPort }: HistoryPanelProps) 
                   className="history-item history-item--session"
                   onClick={() => loadSession(s.id)}
                 >
+                  {s.name && <div className="history-item__name">{s.name}</div>}
                   <div className="history-item__meta">
                     {new Date(s.started_at * 1000).toLocaleString()}
-                    {' · '}{s.asr_provider}
+                    {' · '}{s.source_lang.toUpperCase()} → {s.target_lang.toUpperCase()}
                     {' · '}{s.total_sentences} 句
                     {s.status === 'active' && ' · 进行中'}
                   </div>
@@ -146,11 +170,11 @@ export function HistoryPanel({ open, onClose, backendPort }: HistoryPanelProps) 
               </div>
               {sessionSubtitles.map((sub) => (
                 <div key={sub.id} className="history-item">
-                  <div className="history-item__original">{sub.original}</div>
-                  <div className="history-item__translated">{sub.translated || '(未翻译)'}</div>
+                  <div className="history-item__original">{sub.original_text}</div>
+                  <div className="history-item__translated">{sub.translated_text || '(未翻译)'}</div>
                   <div className="history-item__meta">
-                    {new Date(sub.timestamp * 1000).toLocaleTimeString()}
-                    {sub.isCorrected && ' · LLM 修正'}
+                    {sub.created_at ? new Date(sub.created_at * 1000).toLocaleTimeString() : ''}
+                    {sub.is_corrected && ' · LLM 修正'}
                   </div>
                 </div>
               ))}

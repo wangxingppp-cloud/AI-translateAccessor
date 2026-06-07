@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Settings, Clock, BookOpen, Pin, PinOff, AlertTriangle } from 'lucide-react';
 import './App.css';
 import { useAudioCapture } from './hooks/useAudioCapture';
-import { AudioSourceSelector, AudioControls, AudioVisualizer } from './components/audio';
+import { AudioSourceSelector, AudioControls, AudioVisualizer, SaveDialog } from './components/audio';
 import { SettingsPanel } from './components/settings';
 import { SubtitleList } from './components/subtitle';
 import { useSettingsStore } from './stores/settingsStore';
@@ -24,6 +24,8 @@ function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [glossaryOpen, setGlossaryOpen] = useState(false);
   const [onTop, setOnTop] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
 
   const wsRef = useRef<WebSocketClient | null>(null);
   const llm = useSettingsStore((s) => s.llm);
@@ -89,25 +91,96 @@ function App() {
     setSource(s); if (isTranslating) switchSource(s);
   }, [isTranslating, switchSource]);
 
-  const handleToggle = useCallback(async () => {
+  const handleStart = useCallback(() => {
     const client = wsRef.current; if (!client) return;
-    if (isTranslating) {
-      client.sendControl({ type: 'stop' });
-      await stopCapture();
-      clearSubtitles();
+    client.sendControl({
+      type: 'start',
+      config: {
+        source_lang: srcLang, target_lang: tgtLang, audio_source: source,
+        enable_correction: llm.enabled,
+        llm: { provider: llm.provider, apiKey: llm.apiKey, model: llm.model, baseUrl: llm.baseUrl, enabled: llm.enabled },
+        asr: { provider: asr.provider, apiKey: asr.apiKey, apiSecret: asr.apiSecret, appId: asr.appId, baseUrl: asr.baseUrl },
+      },
+    });
+    startCapture(source);
+    setIsPaused(false);
+  }, [startCapture, source, llm, asr]);
+
+  const handlePause = useCallback(() => {
+    wsRef.current?.sendControl({ type: 'pause' });
+    setIsPaused(true);
+  }, []);
+
+  const handleResume = useCallback(() => {
+    wsRef.current?.sendControl({ type: 'resume' });
+    setIsPaused(false);
+  }, []);
+
+  const handleStopRequest = useCallback(() => {
+    // Pause audio capture but don't clear yet — show save dialog first
+    wsRef.current?.sendControl({ type: 'pause' });
+    setIsPaused(true);
+    setSaveDialogOpen(true);
+  }, []);
+
+  const handleSave = useCallback(async (name: string) => {
+    const client = wsRef.current;
+    console.log('[SAVE] handleSave called', { name, backendPort, entryCount: entries.length, srcLang, tgtLang });
+
+    // Persist current subtitles to history via REST API
+    if (backendPort && entries.length > 0) {
+      const payload = {
+        name,
+        source_lang: srcLang,
+        target_lang: tgtLang,
+        subtitles: entries.map((e) => ({
+          original: e.original,
+          translated: e.translated,
+          timestamp: e.timestamp,
+        })),
+      };
+      console.log('[SAVE] POST payload:', JSON.stringify(payload).slice(0, 500));
+
+      try {
+        const url = `http://127.0.0.1:${backendPort}/api/sessions`;
+        console.log('[SAVE] POST →', url);
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        console.log('[SAVE] POST response status:', resp.status, resp.statusText);
+        const respBody = await resp.text();
+        console.log('[SAVE] POST response body:', respBody);
+        if (!resp.ok) console.warn('[SAVE] POST failed:', resp.status, respBody);
+        else console.log('[SAVE] POST success:', respBody);
+      } catch (err) {
+        console.error('[SAVE] POST error:', err);
+      }
     } else {
-      client.sendControl({
-        type: 'start',
-        config: {
-          source_lang: srcLang, target_lang: tgtLang, audio_source: source,
-          enable_correction: llm.enabled,
-          llm: { provider: llm.provider, apiKey: llm.apiKey, model: llm.model, baseUrl: llm.baseUrl, enabled: llm.enabled },
-          asr: { provider: asr.provider, apiKey: asr.apiKey, apiSecret: asr.apiSecret, appId: asr.appId, baseUrl: asr.baseUrl },
-        },
-      });
-      startCapture(source);
+      console.warn('[SAVE] Skipped POST:', { backendPort, entryCount: entries.length });
     }
-  }, [isTranslating, stopCapture, startCapture, source, llm, asr, clearSubtitles]);
+    client?.sendControl({ type: 'stop' });
+    await stopCapture();
+    clearSubtitles();
+    setIsPaused(false);
+    setSaveDialogOpen(false);
+  }, [backendPort, entries, srcLang, tgtLang, stopCapture, clearSubtitles]);
+
+  const handleDiscard = useCallback(async () => {
+    wsRef.current?.sendControl({ type: 'stop' });
+    await stopCapture();
+    clearSubtitles();
+    setIsPaused(false);
+    setSaveDialogOpen(false);
+  }, [stopCapture, clearSubtitles]);
+
+  const handleSaveCancel = useCallback(() => {
+    // User cancelled — resume translation
+    wsRef.current?.sendControl({ type: 'resume' });
+    setIsPaused(false);
+    setSaveDialogOpen(false);
+  }, []);
 
   const connected = wsState === 'connected';
   const connecting = wsState === 'connecting' || wsState === 'reconnecting';
@@ -181,13 +254,26 @@ function App() {
 
         <div className="control-bar">
           <AudioSourceSelector value={source} onChange={handleSourceChange} disabled={isTranslating} />
-          <AudioControls state={audioState} onStart={handleToggle} onStop={handleToggle} />
+          <AudioControls
+            state={audioState}
+            isPaused={isPaused}
+            onStart={handleStart}
+            onPause={handlePause}
+            onResume={handleResume}
+            onStopRequest={handleStopRequest}
+          />
         </div>
       </main>
 
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <HistoryPanel open={historyOpen} onClose={() => setHistoryOpen(false)} backendPort={backendPort} />
       <GlossaryManager open={glossaryOpen} onClose={() => setGlossaryOpen(false)} backendPort={backendPort} />
+      <SaveDialog
+        open={saveDialogOpen}
+        onSave={handleSave}
+        onDiscard={handleDiscard}
+        onCancel={handleSaveCancel}
+      />
     </div>
   );
 }
