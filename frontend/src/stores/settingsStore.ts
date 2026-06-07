@@ -6,7 +6,18 @@ import { DEFAULT_SETTINGS, LLM_PROVIDERS, ASR_PROVIDERS } from '../types/config'
 const KEY = 'ai-translate-settings';
 
 function load(): AppSettings {
-  try { const raw = localStorage.getItem(KEY); if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }; } catch { /* */ }
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        ...DEFAULT_SETTINGS,
+        ...parsed,
+        asr: { ...DEFAULT_SETTINGS.asr, ...parsed.asr },
+        llm: { ...DEFAULT_SETTINGS.llm, ...parsed.llm },
+      };
+    }
+  } catch { /* */ }
   return { ...DEFAULT_SETTINGS };
 }
 function save(s: AppSettings): void {
@@ -26,6 +37,7 @@ interface SettingsStore extends AppSettings {
   setAsrApiKey: (k: string) => void;
   setAsrApiSecret: (s: string) => void;
   setAsrBaseUrl: (u: string) => void;
+  setAsrAppId: (a: string) => void;
   // Language
   setSourceLang: (l: string) => void;
   setTargetLang: (l: string) => void;
@@ -56,6 +68,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     setAsrApiKey: (apiKey) => set((s) => { const n = { ...s, asr: { ...s.asr, apiKey } }; save(n); return n; }),
     setAsrApiSecret: (apiSecret) => set((s) => { const n = { ...s, asr: { ...s.asr, apiSecret } }; save(n); return n; }),
     setAsrBaseUrl: (baseUrl) => set((s) => { const n = { ...s, asr: { ...s.asr, baseUrl } }; save(n); return n; }),
+    setAsrAppId: (appId) => set((s) => { const n = { ...s, asr: { ...s.asr, appId } }; save(n); return n; }),
     setSourceLang: (sourceLang) => set((s) => { const n = { ...s, sourceLang }; save(n); return n; }),
     setTargetLang: (targetLang) => set((s) => { const n = { ...s, targetLang }; save(n); return n; }),
     reset: () => { set(DEFAULT_SETTINGS); save(DEFAULT_SETTINGS); },

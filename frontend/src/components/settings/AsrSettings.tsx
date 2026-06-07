@@ -10,6 +10,7 @@ export function AsrSettings() {
   const setAsrProvider = useSettingsStore((s) => s.setAsrProvider);
   const setAsrApiKey = useSettingsStore((s) => s.setAsrApiKey);
   const setAsrApiSecret = useSettingsStore((s) => s.setAsrApiSecret);
+  const setAsrAppId = useSettingsStore((s) => s.setAsrAppId);
   const setAsrBaseUrl = useSettingsStore((s) => s.setAsrBaseUrl);
 
   // Local draft — only saved on Apply
@@ -18,12 +19,17 @@ export function AsrSettings() {
 
   const providerInfo = ASR_PROVIDERS.find((p) => p.id === draft.provider);
   const isCloud = draft.provider !== 'local';
-  const isValid = !isCloud || (draft.apiKey.trim() && draft.apiSecret.trim());
+  const isValid = !isCloud || (
+    draft.apiKey?.trim() &&
+    draft.apiSecret?.trim() &&
+    (draft.provider !== 'iflytek' || draft.appId?.trim())
+  );
 
   const handleApply = () => {
     setAsrProvider(draft.provider);
     setAsrApiKey(draft.apiKey);
     setAsrApiSecret(draft.apiSecret);
+    setAsrAppId(draft.appId);
     setAsrBaseUrl(draft.baseUrl);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -55,6 +61,14 @@ export function AsrSettings() {
 
       {isCloud && (
         <div className="settings-body">
+          {draft.provider === 'iflytek' && (
+            <div className="settings-row">
+              <label className="settings-label" htmlFor="asr-app-id">APPID</label>
+              <input id="asr-app-id" type="text" className="settings-input"
+                value={draft.appId} onChange={(e) => setDraft((d) => ({ ...d, appId: e.target.value }))}
+                placeholder="讯飞 APPID" />
+            </div>
+          )}
           <div className="settings-row">
             <label className="settings-label" htmlFor="asr-api-key">API Key</label>
             <input id="asr-api-key" type="password" className="settings-input"
@@ -80,7 +94,7 @@ export function AsrSettings() {
 
       <div className="settings-row">
         <button type="button" className="control-btn control-btn--start" onClick={handleApply}
-          disabled={!isValid} title={!isValid ? '云端引擎需要填写 API Key 和 API Secret' : '应用设置'}>
+          disabled={!isValid} title={!isValid ? '云端引擎需要填写所有必填字段（讯飞需要 APPID + API Key + API Secret）' : '应用设置'}>
           {saved ? '✓ 已应用' : '应用'}
         </button>
       </div>

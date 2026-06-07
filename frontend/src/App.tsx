@@ -103,7 +103,7 @@ function App() {
           source_lang: srcLang, target_lang: tgtLang, audio_source: source,
           enable_correction: llm.enabled,
           llm: { provider: llm.provider, apiKey: llm.apiKey, model: llm.model, baseUrl: llm.baseUrl, enabled: llm.enabled },
-          asr: { provider: asr.provider, apiKey: asr.apiKey, apiSecret: asr.apiSecret, appId: "", baseUrl: asr.baseUrl },
+          asr: { provider: asr.provider, apiKey: asr.apiKey, apiSecret: asr.apiSecret, appId: asr.appId, baseUrl: asr.baseUrl },
         },
       });
       startCapture(source);

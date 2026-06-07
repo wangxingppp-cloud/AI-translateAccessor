@@ -136,7 +136,7 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
         base_url=asr_raw.get("baseUrl", ""),
     )
     _session_asr_configs[session_id] = asr_config
-    if asr_config.provider != "local" and asr_config.api_key:
+    if asr_config.provider != "local" and (asr_config.api_key or asr_config.app_id):
         try:
             _session_cloud_asr[session_id] = create_cloud_asr(asr_config)
             logger.info(f"Session [{session_id}] using cloud ASR: {asr_config.provider}")
