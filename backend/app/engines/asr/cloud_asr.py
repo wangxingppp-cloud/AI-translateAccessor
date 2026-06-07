@@ -43,33 +43,31 @@ class IFlytekRTASR(StreamingASR):
     Endpoint: wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1
     Auth: HmacSHA1(accessKeySecret, sortedBaseString) → Base64
     Send: raw binary PCM chunks (1280 bytes / 40ms)
-    Receive: JSON { action, code, data, desc, sid }
+    Receive: background task pushes results into asyncio.Queue
     """
 
     DEFAULT_URL = "wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1"
     FRAME_SIZE = 1280  # bytes per frame (40ms @ 16kHz 16bit)
 
     def __init__(self, config: AsrEngineConfig):
-        self._app_id = config.app_id           # appId
-        self._api_key = config.api_key         # accessKeyId
-        self._api_secret = config.api_secret   # accessKeySecret
+        self._app_id = config.app_id
+        self._api_key = config.api_key
+        self._api_secret = config.api_secret
         self._base_url = config.base_url or self.DEFAULT_URL
+        if "iflyaisol.com" in self._base_url and "/ast/" not in self._base_url:
+            self._base_url = self.DEFAULT_URL
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._connected = False
+        self._connecting = False
+        self._connect_lock: Optional[asyncio.Lock] = None
+        self._send_lock: Optional[asyncio.Lock] = None
+        self._recv_lock: Optional[asyncio.Lock] = None
         self._buffer = b""
         self._session_id: Optional[str] = None
 
     def _build_url(self) -> str:
-        """
-        Build authenticated URL per the official protocol:
-        1. Collect all params (except signature), sort by key
-        2. URL-encode keys & values, join with &
-        3. HmacSHA1(accessKeySecret, baseString) → Base64 → signature
-        """
         utc = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        # Format: 2025-09-04T15:38:07+0800
         if not utc or utc[-5] not in "+-":
-            # Fallback: use local timezone offset
             offset = time.timezone if time.daylight == 0 else time.altzone
             sign = "-" if offset > 0 else "+"
             offset = abs(offset)
@@ -84,111 +82,130 @@ class IFlytekRTASR(StreamingASR):
             "lang": "autodialect",
             "samplerate": "16000",
         }
-
-        # Sort by key, URL-encode keys and values
         sorted_params = sorted(params.items())
         base_string = "&".join(f"{quote(k, safe='')}={quote(v, safe='')}" for k, v in sorted_params)
-
-        # HmacSHA1 with accessKeySecret as key
         signature = base64.b64encode(
-            hmac.new(
-                self._api_secret.encode("utf-8"),
-                base_string.encode("utf-8"),
-                hashlib.sha1,
-            ).digest()
-        ).decode("utf-8")
-
-        # Append signature to query string
+            hmac.new(self._api_secret.encode(), base_string.encode(), hashlib.sha1).digest()
+        ).decode()
         full_qs = f"{base_string}&{quote('signature', safe='')}={quote(signature, safe='')}"
         return f"{self._base_url}?{full_qs}"
 
     async def _connect(self) -> bool:
-        url = self._build_url()
-        log_url = url.split("?")[0]
-        log_params = url.split("?")[1] if "?" in url else ""
-        logger.info(f"IFlytek RTASR connecting: {log_url}")
-        logger.info(f"IFlytek RTASR params: {log_params[:200]}...")
-        try:
-            self._ws = await websockets.connect(url, ping_interval=30)
-            # Wait for "started" handshake response
-            greeting = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
-            msg = json.loads(greeting)
-            logger.info(f"IFlytek RTASR greeting: {greeting[:500]}")
-            # Response: { "msg_type": "action", "data": { "action": "started", "sessionId": "..." } }
-            data = msg.get("data", {})
-            action = data.get("action", "") if isinstance(data, dict) else ""
-            if action == "started":
-                self._session_id = data.get("sessionId", "")
-                self._connected = True
-                logger.info(f"IFlytek RTASR started, sessionId={self._session_id}")
+        if self._connecting:
+            return False
+        if self._connect_lock is None:
+            self._connect_lock = asyncio.Lock()
+        async with self._connect_lock:
+            if self._connected and self._ws:
                 return True
-            else:
-                code = msg.get("code", data.get("code", "?"))
-                desc = msg.get("desc", data.get("desc", ""))
-                logger.error(f"IFlytek RTASR handshake failed: action={action} code={code} desc={desc}")
-                await self._ws.close()
+            self._connecting = True
+            try:
+                url = self._build_url()
+                logger.info(f"IFlytek RTASR connecting: {url.split('?')[0]}")
+                self._ws = await websockets.connect(url, ping_interval=30)
+                greeting = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
+                msg = json.loads(greeting)
+                logger.info(f"IFlytek RTASR greeting: {greeting[:500]}")
+                data = msg.get("data", {})
+                action = data.get("action", "") if isinstance(data, dict) else ""
+                if action == "started":
+                    self._session_id = data.get("sessionId", "")
+                    self._connected = True
+                    self._send_lock = asyncio.Lock()
+                    self._recv_lock = asyncio.Lock()
+                    logger.info(f"IFlytek RTASR started, sessionId={self._session_id}")
+                    return True
+                else:
+                    code = msg.get("code", data.get("code", "?"))
+                    desc = msg.get("desc", data.get("desc", ""))
+                    logger.error(f"IFlytek RTASR handshake failed: action={action} code={code} desc={desc}")
+                    await self._ws.close()
+                    self._ws = None
+                    return False
+            except asyncio.TimeoutError:
+                logger.error("IFlytek RTASR handshake timeout")
+                if self._ws:
+                    await self._ws.close()
+                    self._ws = None
                 return False
-        except asyncio.TimeoutError:
-            logger.error("IFlytek RTASR handshake timeout (no 'started' response)")
-            return False
-        except Exception as e:
-            logger.error(f"IFlytek RTASR connection failed: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"IFlytek RTASR connection failed: {e}")
+                self._ws = None
+                return False
+            finally:
+                self._connecting = False
 
     async def process_chunk(self, pcm_bytes: bytes) -> AsyncGenerator[ASRResult, None]:
+        logger.info(f"RTASR process_chunk enter: connected={self._connected} ws={self._ws is not None} pcm={len(pcm_bytes)}B")
         if not self._connected and not await self._connect():
+            logger.warning("RTASR process_chunk: connect failed, returning")
             return
         if self._ws is None:
+            logger.warning("RTASR process_chunk: ws is None after connect")
             return
 
         self._buffer += pcm_bytes
+        logger.info(f"RTASR buffer={len(self._buffer)}B")
 
         try:
-            # Send buffered frames
-            while len(self._buffer) >= self.FRAME_SIZE:
-                frame = self._buffer[:self.FRAME_SIZE]
-                self._buffer = self._buffer[self.FRAME_SIZE:]
-                await self._ws.send(frame)
+            # Send buffered frames (under send lock)
+            if self._send_lock is None:
+                self._send_lock = asyncio.Lock()
+            async with self._send_lock:
+                frames_sent = 0
+                while len(self._buffer) >= self.FRAME_SIZE:
+                    frame = self._buffer[:self.FRAME_SIZE]
+                    self._buffer = self._buffer[self.FRAME_SIZE:]
+                    await self._ws.send(frame)
+                    frames_sent += 1
+                if frames_sent > 0:
+                    logger.info(f"RTASR sent {frames_sent} frames")
 
-            # Drain all available responses
-            for _ in range(20):
-                try:
-                    resp = await asyncio.wait_for(self._ws.recv(), timeout=0.1)
+            # Receive results (under recv lock, short timeout)
+            if self._recv_lock is None:
+                self._recv_lock = asyncio.Lock()
+            async with self._recv_lock:
+                for _ in range(50):
+                    try:
+                        resp = await asyncio.wait_for(self._ws.recv(), timeout=0.01)
+                    except asyncio.TimeoutError:
+                        logger.info("RTASR recv timeout (no more data)")
+                        break
+                    logger.info(f"RTASR raw resp: {resp[:300]}")
                     msg = json.loads(resp)
-                    msg_type = msg.get("msg_type", "")
 
-                    # Extract action: may be top-level or inside data
+                    # msg_type is the primary action indicator
+                    msg_type = msg.get("msg_type", "")
                     data = msg.get("data")
                     if isinstance(data, dict):
-                        action = data.get("action", msg.get("action", ""))
+                        action = data.get("action", msg.get("action", msg_type))
                     else:
-                        action = msg.get("action", "")
+                        action = msg.get("action", msg_type)
                     code = str(data.get("code", msg.get("code", ""))) if isinstance(data, dict) else str(msg.get("code", ""))
                     desc = data.get("desc", msg.get("desc", "")) if isinstance(data, dict) else msg.get("desc", "")
 
-                    if action == "result" and code == "0":
+                    if (action == "result" or msg_type == "result") and code != "error":
                         if data:
                             text = self._parse_result(data)
+                            logger.info(f"RTASR result: text='{text}'")
                             if text:
-                                # ls=true → final; cn.st.type=0 → confirmed result
+                                is_final = False
                                 if isinstance(data, dict):
                                     is_final = data.get("ls", False) or data.get("cn", {}).get("st", {}).get("type", 1) == 0
-                                else:
-                                    is_final = False
                                 yield ASRResult(text=text, is_final=is_final, timestamp=time.time())
                     elif action == "error" or msg_type == "error":
-                        logger.warning(f"IFlytek RTASR error: code={code} desc={desc}")
-                except asyncio.TimeoutError:
-                    break
-        except websockets.ConnectionClosed as e:
-            logger.warning(f"IFlytek RTASR connection closed: {e}")
+                        logger.warning(f"RTASR error: code={code} desc={desc}")
+                    else:
+                        logger.info(f"RTASR msg: msg_type={msg_type} action={action} code={code}")
+
+        except websockets.ConnectionClosed:
+            logger.warning("RTASR connection closed")
             self._connected = False
             self._ws = None
         except Exception as e:
-            logger.error(f"IFlytek RTASR process_chunk error: {e}")
+            logger.error(f"RTASR process_chunk error: {e}", exc_info=True)
 
     def _parse_result(self, data) -> str:
-        """Parse RTASR result: data.cn.st.rt[].ws[].cw[].w"""
         try:
             obj = json.loads(data) if isinstance(data, str) else data
             text_parts = []

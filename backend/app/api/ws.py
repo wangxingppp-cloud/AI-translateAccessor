@@ -162,19 +162,78 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
             # Cloud ASR path: feed PCM directly, no local SenseVoice
             if cloud_asr:
                 async def _cloud_tx(text: str):
-                    s = sessions.get(session_id)
-                    nmt = get_nmt_engine()
-                    t = await nmt.translate(text)
-                    seq_id = str(uuid.uuid4())
-                    await ws.send_json(SubtitleDraft(sequence_id=seq_id, original=text, translated=t.text, is_sentence_end=True, timestamp=time.time()).model_dump())
+                    """Send original text immediately, translate in background."""
+                    try:
+                        seq_id = str(uuid.uuid4())
+                        # 1. Send original text immediately (no translation yet)
+                        await ws.send_json(SubtitleDraft(
+                            sequence_id=seq_id, original=text, translated="",
+                            is_sentence_end=True, timestamp=time.time()
+                        ).model_dump())
+
+                        # 2. Translate in background, send result when done
+                        async def _do_translate():
+                            try:
+                                s = sessions.get(session_id)
+                                llm_cfg = _session_llm_configs.get(session_id)
+                                if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                                    from ..engines.correction.corrector import LLMCorrector
+                                    corrector = LLMCorrector(llm_cfg)
+                                    src_l = (s.config.source_lang if s else "EN").upper()
+                                    tgt_l = (s.config.target_lang if s else "ZH").upper()
+                                    prompt = f"Translate {src_l} to {tgt_l}:\n\n{text}\n\n{tgt_l}:"
+                                    result = await corrector._call_llm(prompt)
+                                    translated = result.strip() or text
+                                else:
+                                    nmt = get_nmt_engine()
+                                    t = await nmt.translate(text)
+                                    translated = t.text
+                                await ws.send_json(SubtitleDraft(
+                                    sequence_id=seq_id, original=text, translated=translated,
+                                    is_sentence_end=True, timestamp=time.time()
+                                ).model_dump())
+                            except Exception as e:
+                                logger.error(f"[CloudTX] translate error: {e}")
+
+                        asyncio.ensure_future(_do_translate())
+                    except Exception as e:
+                        logger.error(f"[CloudTX] error: {e}", exc_info=True)
+
+                _cloud_pcm_queue: asyncio.Queue = asyncio.Queue()
+
+                async def _cloud_asr_loop():
+                    """Long-running task: batch drain queue → send frames → recv results → translate."""
+                    logger.info("[CloudASR:sys] loop started")
+                    while True:
+                        # Wait for at least one chunk
+                        pcm = await _cloud_pcm_queue.get()
+                        if pcm is None:
+                            break
+
+                        # Drain remaining chunks (batch)
+                        chunks = [pcm]
+                        while True:
+                            try:
+                                chunks.append(_cloud_pcm_queue.get_nowait())
+                            except asyncio.QueueEmpty:
+                                break
+
+                        try:
+                            # Feed all chunks at once, collect results
+                            combined = b"".join(chunks)
+                            async for result in cloud_asr.process_chunk(combined):
+                                if result.text:
+                                    logger.info(f"[CloudASR:sys] text='{result.text[:60]}'")
+                                    await _cloud_tx(result.text)
+                        except Exception as e:
+                            logger.error(f"[CloudASR:sys] error: {e}")
+                    logger.info("[CloudASR:sys] loop ended")
+
+                _cloud_asr_task = asyncio.ensure_future(_cloud_asr_loop())
 
                 def _on_cloud_pcm(pcm: bytes):
-                    async def _process():
-                        async for result in cloud_asr.process_chunk(pcm):
-                            logger.info(f"[CloudASR:sys] text='{result.text}' is_final={result.is_final}")
-                            if result.text:
-                                await _cloud_tx(result.text)
-                    asyncio.create_task(_process())
+                    loop = asyncio.get_event_loop()
+                    loop.call_soon_threadsafe(_cloud_pcm_queue.put_nowait, pcm)
 
                 cap = get_audio_capture()
                 cap.start(_on_cloud_pcm)
@@ -346,22 +405,43 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
     cloud_asr = _session_cloud_asr.get(session_id)
     if cloud_asr:
         try:
+            logger.info(f"[CloudASR:mic] process_chunk called, pcm={len(data)}B")
             async for asr_result in cloud_asr.process_chunk(data):
                 logger.info(f"[CloudASR] session={session_id} text='{asr_result.text}' is_final={asr_result.is_final}")
                 if asr_result.text:
                     sessions.record_sentence(session_id)
-                    nmt_engine = get_nmt_engine()
-                    translation = await nmt_engine.translate(asr_result.text)
-                    logger.info(f"[CloudASR] translated='{translation.text}' latency={translation.latency_ms}ms")
                     seq_id = str(uuid.uuid4())
-                    ctx = _get_context(session_id)
-                    if ctx and translation.text:
-                        ctx.add(source=asr_result.text, target=translation.text, sequence_id=seq_id, timestamp=time.time())
+                    # Send original immediately
                     await ws.send_json(
-                        SubtitleDraft(sequence_id=seq_id, original=asr_result.text, translated=translation.text,
+                        SubtitleDraft(sequence_id=seq_id, original=asr_result.text, translated="",
                                       is_sentence_end=asr_result.is_final, confidence=asr_result.confidence,
-                                      latency_ms=round(translation.latency_ms), timestamp=asr_result.timestamp).model_dump()
+                                      timestamp=asr_result.timestamp).model_dump()
                     )
+                    # Translate in background
+                    _orig = asr_result.text
+                    async def _bg_translate():
+                        try:
+                            s = sessions.get(session_id)
+                            llm_cfg = _session_llm_configs.get(session_id)
+                            if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                                from ..engines.correction.corrector import LLMCorrector
+                                corrector = LLMCorrector(llm_cfg)
+                                src_l = (s.config.source_lang if s else "EN").upper()
+                                tgt_l = (s.config.target_lang if s else "ZH").upper()
+                                prompt = f"Translate {src_l} to {tgt_l}:\n\n{_orig}\n\n{tgt_l}:"
+                                result = await corrector._call_llm(prompt)
+                                translated = result.strip() or _orig
+                            else:
+                                nmt_engine = get_nmt_engine()
+                                translation = await nmt_engine.translate(_orig)
+                                translated = translation.text
+                            await ws.send_json(
+                                SubtitleDraft(sequence_id=seq_id, original=_orig, translated=translated,
+                                              is_sentence_end=True, timestamp=time.time()).model_dump()
+                            )
+                        except Exception as e:
+                            logger.error(f"[CloudASR] translate error: {e}")
+                    asyncio.ensure_future(_bg_translate())
         except Exception as e:
             logger.warning(f"Cloud ASR error [{session_id}]: {e}", exc_info=True)
         return
