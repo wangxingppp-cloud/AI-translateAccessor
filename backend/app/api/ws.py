@@ -161,73 +161,175 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
             import numpy as np
             # Cloud ASR path: feed PCM directly, no local SenseVoice
             if cloud_asr:
-                async def _cloud_tx(text: str):
-                    """Send original text immediately, translate in background."""
+                async def _do_translate(sid: str, full_text: str):
+                    """Translate full_text and send result with sid."""
                     try:
-                        seq_id = str(uuid.uuid4())
-                        # 1. Send original text immediately (no translation yet)
+                        s = sessions.get(session_id)
+                        if s and s.state != SessionState.LISTENING:
+                            return
+                        llm_cfg = _session_llm_configs.get(session_id)
+                        if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                            from ..engines.correction.corrector import LLMCorrector
+                            corrector = LLMCorrector(llm_cfg)
+                            src_l = (s.config.source_lang if s else "EN").upper()
+                            tgt_l = (s.config.target_lang if s else "ZH").upper()
+                            prompt = f"Translate {src_l} to {tgt_l}:\n\n{full_text}\n\n{tgt_l}:"
+                            result = await corrector._call_llm(prompt)
+                            translated = result.strip() or full_text
+                        else:
+                            nmt = get_nmt_engine()
+                            t = await nmt.translate(full_text)
+                            translated = t.text
+                        s = sessions.get(session_id)
+                        if s and s.state != SessionState.LISTENING:
+                            return
                         await ws.send_json(SubtitleDraft(
-                            sequence_id=seq_id, original=text, translated="",
-                            is_sentence_end=True, timestamp=time.time()
+                            sequence_id=sid, original=full_text, translated=translated,
+                            is_sentence_end=True, is_replace=True,
+                            timestamp=time.time()
                         ).model_dump())
-
-                        # 2. Translate in background, send result when done
-                        async def _do_translate():
-                            try:
-                                s = sessions.get(session_id)
-                                llm_cfg = _session_llm_configs.get(session_id)
-                                if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
-                                    from ..engines.correction.corrector import LLMCorrector
-                                    corrector = LLMCorrector(llm_cfg)
-                                    src_l = (s.config.source_lang if s else "EN").upper()
-                                    tgt_l = (s.config.target_lang if s else "ZH").upper()
-                                    prompt = f"Translate {src_l} to {tgt_l}:\n\n{text}\n\n{tgt_l}:"
-                                    result = await corrector._call_llm(prompt)
-                                    translated = result.strip() or text
-                                else:
-                                    nmt = get_nmt_engine()
-                                    t = await nmt.translate(text)
-                                    translated = t.text
-                                await ws.send_json(SubtitleDraft(
-                                    sequence_id=seq_id, original=text, translated=translated,
-                                    is_sentence_end=True, timestamp=time.time()
-                                ).model_dump())
-                            except Exception as e:
-                                logger.error(f"[CloudTX] translate error: {e}")
-
-                        asyncio.ensure_future(_do_translate())
                     except Exception as e:
-                        logger.error(f"[CloudTX] error: {e}", exc_info=True)
+                        logger.error(f"[CloudTX] translate error: {e}")
 
                 _cloud_pcm_queue: asyncio.Queue = asyncio.Queue()
 
                 async def _cloud_asr_loop():
-                    """Long-running task: batch drain queue → send frames → recv results → translate."""
-                    logger.info("[CloudASR:sys] loop started")
+                    """ASR -> accumulate -> split at punctuation -> push to frontend."""
+                    _SENT_END = set('.!?。？！…')
+                    _MIN_LEN = 15
+                    _TIMEOUT = 10
+                    logger.info('[CloudASR:sys] loop started')
+
+                    # Backend buffer: completed sentences
+                    history = []
+                    cur_text = ''
+                    cur_id = 's0'
+                    sent_num = 0
+                    last_time = time.time()
+
+                    def _send(text, sid, is_final):
+                        logger.info(f"[SEND] sid={sid} final={is_final} text='{text[:60]}'")
+                        return SubtitleDraft(
+                            sequence_id=sid, original=text, translated='',
+                            is_sentence_end=is_final, is_replace=False,
+                            timestamp=time.time()
+                        )
+
+                    def _commit(sentence):
+                        nonlocal cur_text, cur_id, sent_num, last_time
+                        sid = cur_id
+                        history.append(sentence)
+                        sent_num += 1
+                        cur_id = f's{sent_num}'
+                        cur_text = ''
+                        last_time = time.time()
+                        logger.info(f"[COMMIT] [{sid}] '{sentence[:60]}' (history={len(history)})")
+                        return sid
+
+                    def _has_end_punct(text):
+                        t = text.rstrip()
+                        return t and t[-1] in _SENT_END
+
+                    def _last_punct_pos(text):
+                        return max(text.rfind(c) for c in _SENT_END)
+
                     while True:
-                        # Wait for at least one chunk
                         pcm = await _cloud_pcm_queue.get()
                         if pcm is None:
                             break
 
-                        # Drain remaining chunks (batch)
+                        # Reset on pause
+                        try:
+                            s = sessions.get(session_id)
+                            if s and s.state != SessionState.LISTENING:
+                                while True:
+                                    try: _cloud_pcm_queue.get_nowait()
+                                    except asyncio.QueueEmpty: break
+                                cur_text = ''
+                                sent_num += 1
+                                cur_id = f's{sent_num}'
+                                continue
+                        except Exception:
+                            pass
+
+                        # Drain batch
                         chunks = [pcm]
                         while True:
-                            try:
-                                chunks.append(_cloud_pcm_queue.get_nowait())
-                            except asyncio.QueueEmpty:
-                                break
+                            try: chunks.append(_cloud_pcm_queue.get_nowait())
+                            except asyncio.QueueEmpty: break
 
                         try:
-                            # Feed all chunks at once, collect results
-                            combined = b"".join(chunks)
+                            combined = b''.join(chunks)
                             async for result in cloud_asr.process_chunk(combined):
-                                if result.text:
-                                    logger.info(f"[CloudASR:sys] text='{result.text[:60]}'")
-                                    await _cloud_tx(result.text)
+                                new_text = result.text
+                                if not new_text or new_text == cur_text:
+                                    continue
+                                logger.info(f"[ASR] text='{new_text[:60]}' len={len(new_text)} cur_len={len(cur_text)}")
+
+                                s = sessions.get(session_id)
+                                if not s or s.state != SessionState.LISTENING:
+                                    continue
+
+                                # Timeout -> commit current
+                                if cur_text and time.time() - last_time > _TIMEOUT and len(cur_text.strip()) >= _MIN_LEN:
+                                    sid = _commit(cur_text.strip())
+                                    await ws.send_json(_send(history[-1], sid, True).model_dump())
+                                    asyncio.ensure_future(_do_translate(sid, history[-1]))
+
+                                # Revision: ASR changed earlier words
+                                if cur_text and not new_text.startswith(cur_text):
+                                    if _has_end_punct(new_text) and len(new_text.strip()) >= _MIN_LEN:
+                                        # Has punctuation → split
+                                        pi = _last_punct_pos(new_text)
+                                        sent = new_text[:pi + 1].strip()
+                                        sid = _commit(sent)
+                                        await ws.send_json(_send(history[-1], sid, True).model_dump())
+                                        asyncio.ensure_future(_do_translate(sid, history[-1]))
+                                        remainder = new_text[pi + 1:].strip()
+                                        if remainder:
+                                            cur_text = remainder
+                                            await ws.send_json(_send(remainder, cur_id, False).model_dump())
+                                    elif len(cur_text.strip()) >= _MIN_LEN and len(new_text.strip()) < len(cur_text.strip()) - 5:
+                                        # ASR jumped to shorter text → old sentence is done
+                                        logger.info(f"[JUMP] cur='{cur_text[:40]}' new='{new_text[:40]}'")
+                                        sid = _commit(cur_text.strip())
+                                        await ws.send_json(_send(history[-1], sid, True).model_dump())
+                                        asyncio.ensure_future(_do_translate(sid, history[-1]))
+                                        cur_text = new_text
+                                        last_time = time.time()
+                                        await ws.send_json(_send(new_text, cur_id, False).model_dump())
+                                    else:
+                                        cur_text = new_text
+                                        last_time = time.time()
+                                        await ws.send_json(_send(new_text, cur_id, False).model_dump())
+                                    continue
+
+                                # Text shrank
+                                if len(new_text) < len(cur_text):
+                                    cur_text = new_text
+                                    last_time = time.time()
+                                    await ws.send_json(_send(new_text, cur_id, False).model_dump())
+                                    continue
+
+                                # Text grew
+                                cur_text = new_text
+                                last_time = time.time()
+
+                                if _has_end_punct(new_text) and len(new_text.strip()) >= _MIN_LEN:
+                                    pi = _last_punct_pos(new_text)
+                                    sent = new_text[:pi + 1].strip()
+                                    sid = _commit(sent)
+                                    await ws.send_json(_send(history[-1], sid, True).model_dump())
+                                    asyncio.ensure_future(_do_translate(sid, history[-1]))
+                                    remainder = new_text[pi + 1:].strip()
+                                    if remainder:
+                                        cur_text = remainder
+                                        await ws.send_json(_send(remainder, cur_id, False).model_dump())
+                                else:
+                                    await ws.send_json(_send(new_text, cur_id, False).model_dump())
                         except Exception as e:
-                            logger.error(f"[CloudASR:sys] error: {e}")
-                    logger.info("[CloudASR:sys] loop ended")
+                            logger.error(f'[CloudASR:sys] error: {e}')
+                    logger.info('[CloudASR:sys] loop ended')
 
                 _cloud_asr_task = asyncio.ensure_future(_cloud_asr_loop())
 

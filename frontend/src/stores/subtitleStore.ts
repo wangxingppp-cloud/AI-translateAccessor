@@ -17,9 +17,12 @@ export interface SubtitleEntry {
 }
 
 interface SubtitleStore {
+  /** Completed sentences (history). */
   entries: SubtitleEntry[];
-  /** Add or update a subtitle entry (upsert by id). */
-  addEntry: (entry: SubtitleEntry) => void;
+  /** Current in-progress sentence (real-time display). */
+  current: SubtitleEntry | null;
+  /** Add or update subtitle (handles final vs in-progress). */
+  addEntry: (entry: SubtitleEntry & { isFinal?: boolean; isReplace?: boolean }) => void;
   /** Update an existing entry with corrected text + diff. */
   correctEntry: (id: string, text: string, diff: DiffSegment[]) => void;
   /** Clear all entries (session end). */
@@ -30,23 +33,31 @@ interface SubtitleStore {
 
 export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
   entries: [],
+  current: null,
 
   addEntry: (entry) =>
     set((s) => {
-      const idx = s.entries.findIndex((e) => e.id === entry.id);
-      if (idx >= 0) {
-        // Update existing entry (merge translated if new one has it)
-        const updated = [...s.entries];
-        const prev = updated[idx];
-        updated[idx] = {
-          ...prev,
-          translated: entry.translated || prev.translated,
-          timestamp: entry.timestamp,
+      if (entry.isFinal) {
+        // Dedup: don't add if last entry has same id
+        const lastEntry = s.entries[s.entries.length - 1];
+        if (lastEntry && lastEntry.id === entry.id) {
+          // Update translation if provided
+          const updated = [...s.entries];
+          updated[updated.length - 1] = { ...lastEntry, translated: entry.translated || lastEntry.translated };
+          return { entries: updated, current: null };
+        }
+        const hist: SubtitleEntry = {
+          id: entry.id, original: entry.original, translated: entry.translated || "",
+          isCorrected: false, timestamp: entry.timestamp,
         };
-        return { entries: updated };
+        return { entries: [...s.entries, hist].slice(-100), current: null };
       }
-      // New entry
-      return { entries: [...s.entries, entry].slice(-50) };
+
+      const cur: SubtitleEntry = {
+        id: entry.id, original: entry.original, translated: entry.translated || "",
+        isCorrected: false, timestamp: entry.timestamp,
+      };
+      return { current: cur };
     }),
 
   correctEntry: (id, text, diff) =>
@@ -54,9 +65,10 @@ export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
       entries: s.entries.map((e) =>
         e.id === id ? { ...e, translated: text, isCorrected: true, diff } : e
       ),
+      current: s.current?.id === id ? { ...s.current, translated: text, isCorrected: true, diff } : s.current,
     })),
 
-  clear: () => set({ entries: [] }),
+  clear: () => set({ entries: [], current: null }),
 
   getRecent: (n = 20) => {
     const { entries } = get();
