@@ -52,7 +52,7 @@ export interface AsrConfig {
 
 export const ASR_PROVIDERS: AsrProviderInfo[] = [
   { id: 'local', name: '本地离线', description: 'SenseVoice 多语种 — 免费，延迟 ~2s，无需网络', needsApiKey: false, latency: '~2s', cost: '免费', defaultBaseUrl: '' },
-  { id: 'iflytek', name: '讯飞', description: '流式 ASR — 延迟 ~200ms，中文最佳，需实名认证', needsApiKey: true, latency: '~200ms', cost: '0.008-0.02 元/分钟', defaultBaseUrl: 'wss://office-api-ast-dx.iflyaisol.com/' },
+  { id: 'iflytek', name: '讯飞', description: '流式 ASR — 延迟 ~200ms，中文最佳，需实名认证', needsApiKey: true, latency: '~200ms', cost: '0.008-0.02 元/分钟', defaultBaseUrl: 'wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1' },
   { id: 'baidu', name: '百度', description: '流式 ASR — 延迟 ~300ms，多语种支持好', needsApiKey: true, latency: '~300ms', cost: '0.006-0.015 元/分钟', defaultBaseUrl: 'https://vop.baidu.com/server_api' },
 ];
 

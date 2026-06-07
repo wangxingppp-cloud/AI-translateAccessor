@@ -18,7 +18,7 @@ export interface SubtitleEntry {
 
 interface SubtitleStore {
   entries: SubtitleEntry[];
-  /** Add a new subtitle entry (from subtitle_draft). */
+  /** Add or update a subtitle entry (upsert by id). */
   addEntry: (entry: SubtitleEntry) => void;
   /** Update an existing entry with corrected text + diff. */
   correctEntry: (id: string, text: string, diff: DiffSegment[]) => void;
@@ -32,7 +32,22 @@ export const useSubtitleStore = create<SubtitleStore>((set, get) => ({
   entries: [],
 
   addEntry: (entry) =>
-    set((s) => ({ entries: [...s.entries, entry].slice(-50) })),
+    set((s) => {
+      const idx = s.entries.findIndex((e) => e.id === entry.id);
+      if (idx >= 0) {
+        // Update existing entry (merge translated if new one has it)
+        const updated = [...s.entries];
+        const prev = updated[idx];
+        updated[idx] = {
+          ...prev,
+          translated: entry.translated || prev.translated,
+          timestamp: entry.timestamp,
+        };
+        return { entries: updated };
+      }
+      // New entry
+      return { entries: [...s.entries, entry].slice(-50) };
+    }),
 
   correctEntry: (id, text, diff) =>
     set((s) => ({
