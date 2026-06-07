@@ -47,13 +47,15 @@ export function AsrSettings() {
             <button
               key={p.id}
               type="button"
-              className={`provider-card ${draft.provider === p.id ? 'provider-card--active' : ''}`}
-              onClick={() => setDraft((d) => ({ ...d, provider: p.id, baseUrl: p.defaultBaseUrl }))}
+              className={`provider-card ${draft.provider === p.id ? 'provider-card--active' : ''} ${p.id === 'baidu' ? 'provider-card--disabled' : ''}`}
+              onClick={() => p.id !== 'baidu' && setDraft((d) => ({ ...d, provider: p.id, baseUrl: p.defaultBaseUrl }))}
+              disabled={p.id === 'baidu'}
             >
               <span className="provider-card__name">{p.name}</span>
               <span className="provider-card__desc">{p.description}</span>
               <span className="provider-card__meta">{p.latency} &middot; {p.cost}</span>
               {p.id === storedAsr.provider && <span className="provider-card__badge">使用中</span>}
+              {p.id === 'baidu' && <span className="provider-card__badge provider-card__badge--dev">开发中</span>}
             </button>
           ))}
         </div>

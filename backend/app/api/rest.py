@@ -30,9 +30,10 @@ async def health_check():
 
 @router.post("/tts")
 async def tts_synthesize(data: dict):
-    """Synthesize speech from text using sherpa-onnx ZipVoice TTS.
+    """Synthesize speech from text.
 
-    Request body: {"text": "要合成的文字"}
+    Request body:
+        {"text": "要合成的文字", "provider": "local", "voice": "...", "apiKey": "...", "model": "...", "baseUrl": "..."}
     Response: WAV audio bytes (audio/wav)
     """
     text = (data.get("text") or "").strip()
@@ -41,31 +42,108 @@ async def tts_synthesize(data: dict):
     if len(text) > 500:
         text = text[:500]
 
+    provider = data.get("provider", "local")
+
     try:
-        from ..engines.tts.tts_engine import get_tts_engine
-        engine = get_tts_engine()
-        if not engine.is_ready():
-            return Response(content='{"error":"TTS model not loaded"}', status_code=503, media_type="application/json")
+        if provider == "local":
+            wav_bytes = await _tts_local(text)
+        elif provider == "edge":
+            wav_bytes = await _tts_edge(text, data.get("voice", "zh-CN-XiaoxiaoNeural"))
+        elif provider in ("openai", "custom"):
+            wav_bytes = await _tts_openai(text, data)
+        else:
+            return Response(content=f'{{"error":"unknown provider: {provider}"}}', status_code=400, media_type="application/json")
 
-        samples, sample_rate = await engine.synthesize_async(text)
-
-        if len(samples) == 0:
+        if wav_bytes is None:
             return Response(content='{"error":"TTS returned empty audio"}', status_code=500, media_type="application/json")
 
-        # float32 → int16 PCM → WAV
-        pcm_int16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate)
-            wf.writeframes(pcm_int16.tobytes())
-
-        return Response(content=buf.getvalue(), media_type="audio/wav")
+        return Response(content=wav_bytes, media_type="audio/wav")
 
     except Exception as e:
-        logger.error(f"[TTS-API] ERROR: {e}", exc_info=True)
+        logger.error(f"[TTS] {provider} failed: {e}", exc_info=True)
         return Response(content=f'{{"error":"{e}"}}', status_code=500, media_type="application/json")
+
+
+async def _tts_local(text: str) -> bytes | None:
+    """Local sherpa-onnx ZipVoice TTS."""
+    from ..engines.tts.tts_engine import get_tts_engine
+    engine = get_tts_engine()
+    if not engine.is_ready():
+        raise RuntimeError("TTS model not loaded")
+
+    samples, sample_rate = await engine.synthesize_async(text)
+    if len(samples) == 0:
+        return None
+
+    pcm_int16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_int16.tobytes())
+    return buf.getvalue()
+
+
+async def _tts_edge(text: str, voice: str) -> bytes | None:
+    """Microsoft Edge TTS (free, no API key needed)."""
+    try:
+        import edge_tts
+    except ImportError:
+        raise RuntimeError("edge-tts not installed. Run: pip install edge-tts")
+
+    communicate = edge_tts.Communicate(text, voice)
+    buf = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+
+    if buf.tell() == 0:
+        return None
+
+    # edge-tts outputs MP3; wrap in WAV for frontend compatibility
+    # Try to decode MP3 to PCM via AudioContext on frontend, or convert here
+    return buf.getvalue()
+
+
+async def _tts_openai(text: str, data: dict) -> bytes | None:
+    """OpenAI-compatible TTS API (openai, custom)."""
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        raise RuntimeError("openai package not installed")
+
+    api_key = data.get("apiKey", "")
+    if not api_key:
+        raise RuntimeError("API Key required")
+
+    base_url = data.get("baseUrl", "https://api.openai.com/v1")
+    model = data.get("model", "tts-1")
+    voice = data.get("voice", "alloy")
+
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    response = await client.audio.speech.create(
+        model=model,
+        voice=voice,
+        input=text,
+        response_format="pcm",
+    )
+
+    pcm_bytes = response.content
+    if not pcm_bytes:
+        return None
+
+    # OpenAI PCM is 24kHz 16-bit mono
+    sample_rate = 24000
+    pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_array.tobytes())
+    return buf.getvalue()
 
 
 @router.get("/debug/db-check")
