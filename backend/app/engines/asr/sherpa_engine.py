@@ -132,16 +132,21 @@ class SherpaASREngine:
     def transcribe(self, samples: np.ndarray) -> ASRResult:
         """Transcribe accumulated speech audio (used with VAD)."""
         if self._mode != "offline" or self._recognizer is None:
+            logger.warning(f"[DBG-TRACK] ASR.transcribe: 模式不可用 mode={self._mode} recognizer={'有' if self._recognizer else '无'}")
             return ASRResult(text="", is_final=True)
 
-        if len(samples) < self._sample_rate * 0.3:  # Skip <300ms
+        duration = len(samples) / self._sample_rate
+        if duration < 0.3:  # Skip <300ms
+            logger.info(f"[DBG-TRACK] ASR.transcribe: 跳过过短音频 {duration:.2f}s < 0.3s")
             return ASRResult(text="", is_final=True)
 
+        logger.info(f"[DBG-TRACK] ASR.transcribe: 开始转写 {len(samples)} samples ({duration:.1f}s), mode={self._mode}")
         stream = self._recognizer.create_stream()
         stream.accept_waveform(self._sample_rate, samples.astype(np.float32))
         self._recognizer.decode_stream(stream)
         text = stream.result.text.strip()
 
+        logger.info(f"[DBG-TRACK] ASR.transcribe: 转写完成 → '{text}'")
         return ASRResult(text=text, is_final=True, timestamp=time.time())
 
     # ── Common ─────────────────────────────────────────────────

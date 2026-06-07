@@ -79,20 +79,25 @@ class NMTEngine:
         start = time.perf_counter()
 
         if not text.strip():
+            logger.info(f"[DBG-TRACK] NMT: 空文本，跳过翻译")
             return NMTResult(text="", source_text=text, backend=self._backend)
 
         if not self._initialized:
+            logger.info(f"[DBG-TRACK] NMT: 首次调用，初始化 backend={self._backend}")
             await self._initialize()
 
         translated = text  # Default: echo back
 
         try:
+            logger.info(f"[DBG-TRACK] NMT翻译开始: backend={self._backend}, text='{text[:60]}'")
             if self._backend == "onnx":
                 translated = await asyncio.to_thread(self._translate_onnx, text)
             elif self._backend == "transformers":
                 translated = await asyncio.to_thread(self._translate_transformers, text)
             # "echo" backend: just return text as-is
+            logger.info(f"[DBG-TRACK] NMT翻译完成: '{text[:40]}' → '{translated[:40]}'")
         except Exception as e:
+            logger.warning(f"[DBG-TRACK] NMT翻译异常 [{self._backend}]: {e}")
             logger.warning(f"NMT [{self._backend}] translation failed: {e}")
 
         latency = (time.perf_counter() - start) * 1000

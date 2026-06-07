@@ -39,14 +39,20 @@ class StreamHandler:
 
     async def process_chunk(self, pcm_bytes: bytes) -> AsyncGenerator[ASRResult, None]:
         if len(pcm_bytes) == 0:
+            logger.warning("[DBG-TRACK] StreamHandler: 收到空 pcm_bytes")
             return
 
         try:
             samples = self._bytes_to_float32(pcm_bytes)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[DBG-TRACK] StreamHandler: bytes→float32 失败: {e}")
             return
 
         self._total_chunks += 1
+        if self._total_chunks <= 10 or self._total_chunks % 50 == 0:
+            rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+            logger.info(f"[DBG-TRACK] ④本地ASR chunk #{self._total_chunks}: {len(pcm_bytes)}B, {len(samples)}samples, rms={rms:.5f}")
+
         has_speech = self._vad.process(samples)
 
         if has_speech:
@@ -83,15 +89,19 @@ class StreamHandler:
     async def _flush(self) -> AsyncGenerator[ASRResult, None]:
         """Transcribe accumulated speech as a sentence."""
         if not self._speech_buffer or self._speech_duration < MIN_SPEECH_DURATION:
+            logger.info(f"[DBG-TRACK] ⑤flush跳过: buffer={len(self._speech_buffer)} chunks, duration={self._speech_duration:.2f}s < {MIN_SPEECH_DURATION}s")
             self._speech_buffer.clear()
             self._speech_duration = 0.0
             return
 
         audio = np.concatenate(self._speech_buffer)
+        buf_chunks = len(self._speech_buffer)
         self._speech_buffer.clear()
         self._speech_duration = 0.0
 
+        logger.info(f"[DBG-TRACK] ⑤flush转写: {buf_chunks} chunks, {len(audio)} samples ({len(audio)/TARGET_RATE:.1f}s)")
         result = await asyncio.to_thread(self._engine.transcribe, audio)
+        logger.info(f"[DBG-TRACK] ⑤ASR转写结果: text='{result.text}' engine_mode={self._engine.mode}")
         if result.text and result.text != self._prev_text:
             self._prev_text = result.text
             logger.info(f"[SENTENCE] {self._speech_duration:.1f}s → \"{result.text[:80]}\"")
