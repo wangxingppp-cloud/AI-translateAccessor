@@ -1,12 +1,13 @@
 """
 Download AI Simultaneous Interpretation models.
 
-Usage: python scripts/download_models.py [asr|vad|all]
+Usage: python scripts/download_models.py [asr|vad|nmt|all]
 
 Models:
   asr-streaming — Zipformer English streaming (~100MB) — real-time, <300ms latency
   asr-offline   — SenseVoice multilingual offline (~230MB) — batch, 2-5s latency
   vad           — Silero VAD (~0.6MB)
+  nmt           — opus-mt-en-zh ONNX (~430MB) — local EN→ZH translation
 """
 import urllib.request
 import tarfile
@@ -46,6 +47,42 @@ MODELS = {
 
 DEFAULT = "asr-streaming"
 
+NMT_REPO = "R4kSo1997/opus-mt-en-zh-onnx-int8"
+
+
+def download_nmt(models_dir: Path) -> None:
+    """Download opus-mt-en-zh ONNX model from Hugging Face."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        print("ERROR: huggingface_hub not installed. Run: pip install huggingface_hub")
+        sys.exit(1)
+
+    dest = models_dir / "nmt-en-zh"
+    print(f"\n[NMT EN→ZH Translation]")
+    print(f"  Repo: {NMT_REPO}")
+    print(f"  Dest: {dest}")
+    print(f"  Downloading...")
+
+    snapshot_download(
+        repo_id=NMT_REPO,
+        local_dir=str(dest),
+        local_dir_use_symlinks=False,
+    )
+
+    # Only keep the ONNX files we actually use (encoder + decoder)
+    onnx_dir = dest / "onnx"
+    if onnx_dir.exists():
+        keep = {"encoder_model.onnx", "decoder_model.onnx"}
+        for f in onnx_dir.iterdir():
+            if f.name not in keep:
+                size_mb = f.stat().st_size / (1024 * 1024)
+                f.unlink()
+                print(f"  Removed unused: {f.name} ({size_mb:.0f}MB)")
+
+    files = list(dest.glob("*"))
+    print(f"  Installed {len(files)} files to {dest}")
+
 
 def download(url: str, dest: Path, desc: str) -> None:
     print(f"  Downloading {desc}...")
@@ -62,16 +99,22 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     key = args[0] if args else DEFAULT
 
+    models_dir = Path(__file__).resolve().parent.parent / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    # Handle NMT separately (uses huggingface_hub, not direct URL)
+    if key == "nmt":
+        download_nmt(models_dir)
+        print("\nDone.")
+        return
     if key == "all":
         keys = list(MODELS.keys())
+        download_nmt(models_dir)
     elif key in MODELS:
         keys = [key]
     else:
-        print(f"Unknown model: {key}. Available: {list(MODELS.keys())}")
+        print(f"Unknown model: {key}. Available: {list(MODELS.keys()) + ['nmt']}")
         sys.exit(1)
-
-    models_dir = Path(__file__).resolve().parent.parent / "models"
-    models_dir.mkdir(exist_ok=True)
 
     for k in keys:
         info = MODELS[k]
