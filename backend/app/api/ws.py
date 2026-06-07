@@ -171,6 +171,7 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
                 def _on_cloud_pcm(pcm: bytes):
                     async def _process():
                         async for result in cloud_asr.process_chunk(pcm):
+                            logger.info(f"[CloudASR:sys] text='{result.text}' is_final={result.is_final}")
                             if result.text:
                                 await _cloud_tx(result.text)
                     asyncio.create_task(_process())
@@ -182,43 +183,43 @@ async def _handle_start(session_id: str, ws: WebSocket, payload: dict) -> None:
             else:
                 # Local ASR path: RingBuffer + MarkGenerator + TranscriptionWorker
                 from ..engines.asr.ring_buffer import RingBuffer
-            from ..engines.asr.mark_processor import MarkGenerator
-            from ..engines.asr.transcription_worker import TranscriptionWorker
-            ring = RingBuffer()
-            gen = MarkGenerator(ring)
-            async def _tx(original: str, duration: float):
-                logger.info(f"[TX] \"{original[:60]}\" ({duration:.1f}s)")
-                s = sessions.get(session_id)
-                glossary = [t.model_dump() for t in s.config.glossary_terms] if s else []
-                llm_cfg = _session_llm_configs.get(session_id)
-                if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
-                    from ..engines.correction.corrector import LLMCorrector
-                    try:
-                        corrector = LLMCorrector(llm_cfg)
-                        s = sessions.get(session_id)
-                        src_l = (s.config.source_lang if s else "EN").upper()
-                        tgt_l = (s.config.target_lang if s else "ZH").upper()
-                        prompt = f"Translate {src_l} to {tgt_l}:\n\n{original}\n\n{tgt_l}:"
-                        result = await corrector._call_llm(prompt)
-                        translated = result.strip() or original
-                    except Exception:
-                        translated = original
-                else:
-                    nmt = get_nmt_engine()
-                    t = await nmt.translate(original)
-                    translated = t.text
-                seq_id = str(uuid.uuid4())
-                ctx = _get_context(session_id)
-                if ctx and translated:
-                    ctx.add(source=original, target=translated, sequence_id=seq_id, timestamp=time.time())
-                await ws.send_json(SubtitleDraft(sequence_id=seq_id, original=original, translated=translated, is_sentence_end=True, timestamp=time.time()).model_dump())
-            worker = TranscriptionWorker(ring, gen.queue, _tx)
-            cap = get_audio_capture()
-            cap.start(lambda pcm: ring.write(np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0))
-            gen.start(); worker.start()
-            asyncio.create_task(gen.run()); asyncio.create_task(worker.run())
-            _session_systems[session_id] = (ring, gen, worker)
-            logger.info(f"Session [{session_id}] system capture started (RingBuffer+Worker)")
+                from ..engines.asr.mark_processor import MarkGenerator
+                from ..engines.asr.transcription_worker import TranscriptionWorker
+                ring = RingBuffer()
+                gen = MarkGenerator(ring)
+                async def _tx(original: str, duration: float):
+                    logger.info(f"[TX] \"{original[:60]}\" ({duration:.1f}s)")
+                    s = sessions.get(session_id)
+                    glossary = [t.model_dump() for t in s.config.glossary_terms] if s else []
+                    llm_cfg = _session_llm_configs.get(session_id)
+                    if llm_cfg and llm_cfg.enabled and llm_cfg.api_key:
+                        from ..engines.correction.corrector import LLMCorrector
+                        try:
+                            corrector = LLMCorrector(llm_cfg)
+                            s = sessions.get(session_id)
+                            src_l = (s.config.source_lang if s else "EN").upper()
+                            tgt_l = (s.config.target_lang if s else "ZH").upper()
+                            prompt = f"Translate {src_l} to {tgt_l}:\n\n{original}\n\n{tgt_l}:"
+                            result = await corrector._call_llm(prompt)
+                            translated = result.strip() or original
+                        except Exception:
+                            translated = original
+                    else:
+                        nmt = get_nmt_engine()
+                        t = await nmt.translate(original)
+                        translated = t.text
+                    seq_id = str(uuid.uuid4())
+                    ctx = _get_context(session_id)
+                    if ctx and translated:
+                        ctx.add(source=original, target=translated, sequence_id=seq_id, timestamp=time.time())
+                    await ws.send_json(SubtitleDraft(sequence_id=seq_id, original=original, translated=translated, is_sentence_end=True, timestamp=time.time()).model_dump())
+                worker = TranscriptionWorker(ring, gen.queue, _tx)
+                cap = get_audio_capture()
+                cap.start(lambda pcm: ring.write(np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0))
+                gen.start(); worker.start()
+                asyncio.create_task(gen.run()); asyncio.create_task(worker.run())
+                _session_systems[session_id] = (ring, gen, worker)
+                logger.info(f"Session [{session_id}] system capture started (RingBuffer+Worker)")
         except Exception as e:
             logger.warning(f"System capture failed: {e}")
 
@@ -346,10 +347,12 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
     if cloud_asr:
         try:
             async for asr_result in cloud_asr.process_chunk(data):
+                logger.info(f"[CloudASR] session={session_id} text='{asr_result.text}' is_final={asr_result.is_final}")
                 if asr_result.text:
                     sessions.record_sentence(session_id)
                     nmt_engine = get_nmt_engine()
                     translation = await nmt_engine.translate(asr_result.text)
+                    logger.info(f"[CloudASR] translated='{translation.text}' latency={translation.latency_ms}ms")
                     seq_id = str(uuid.uuid4())
                     ctx = _get_context(session_id)
                     if ctx and translation.text:
@@ -360,7 +363,7 @@ async def _process_audio_chunk(session_id: str, ws: WebSocket, data: bytes) -> N
                                       latency_ms=round(translation.latency_ms), timestamp=asr_result.timestamp).model_dump()
                     )
         except Exception as e:
-            logger.warning(f"Cloud ASR error [{session_id}]: {e}")
+            logger.warning(f"Cloud ASR error [{session_id}]: {e}", exc_info=True)
         return
 
     # Mic mode: not using ring buffer system

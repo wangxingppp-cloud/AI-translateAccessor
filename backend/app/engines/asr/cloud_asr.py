@@ -7,9 +7,9 @@ import hmac
 import base64
 import time
 import json
-from datetime import datetime, timezone
+import uuid as _uuid
 from typing import AsyncGenerator, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, quote, urlparse
 from dataclasses import dataclass
 
 import websockets
@@ -32,72 +32,105 @@ class StreamingASR:
 
 
 # ---------------------------------------------------------------------------
-# iFlytek Real-Time ASR (RTASR) — used for 大模型 / iflyaisol endpoints
+# iFlytek Real-Time ASR (RTASR) — 实时语音转写大模型
+# Protocol doc: wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1
 # ---------------------------------------------------------------------------
 
 class IFlytekRTASR(StreamingASR):
     """
-    iFlytek Real-Time Speech Transcription (实时语音转写) via WebSocket.
+    iFlytek Real-Time Speech Transcription (实时语音转写大模型).
 
-    Used for the newer endpoints (e.g. office-api-ast-dx.iflyaisol.com).
-    Auth: HMAC-SHA256 signature
-    Send: raw binary PCM chunks
-    Receive: JSON { action, code, data }
+    Endpoint: wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1
+    Auth: HmacSHA1(accessKeySecret, sortedBaseString) → Base64
+    Send: raw binary PCM chunks (1280 bytes / 40ms)
+    Receive: JSON { action, code, data, desc, sid }
     """
 
-    DEFAULT_URL = "wss://office-api-ast-dx.iflyaisol.com/"
+    DEFAULT_URL = "wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1"
     FRAME_SIZE = 1280  # bytes per frame (40ms @ 16kHz 16bit)
 
     def __init__(self, config: AsrEngineConfig):
-        self._app_id = config.app_id
-        self._api_key = config.api_key
-        self._api_secret = config.api_secret
-        self._ws_url = config.base_url or self.DEFAULT_URL
+        self._app_id = config.app_id           # appId
+        self._api_key = config.api_key         # accessKeyId
+        self._api_secret = config.api_secret   # accessKeySecret
+        self._base_url = config.base_url or self.DEFAULT_URL
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._connected = False
         self._buffer = b""
-        self._language = "zh_cn"
+        self._session_id: Optional[str] = None
 
     def _build_url(self) -> str:
-        """Build authenticated WebSocket URL with HMAC-SHA256 signature."""
-        parsed = urlparse(self._ws_url)
-        host = parsed.hostname or "office-api-ast-dx.iflyaisol.com"
-        path = parsed.path or "/"
+        """
+        Build authenticated URL per the official protocol:
+        1. Collect all params (except signature), sort by key
+        2. URL-encode keys & values, join with &
+        3. HmacSHA1(accessKeySecret, baseString) → Base64 → signature
+        """
+        utc = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        # Format: 2025-09-04T15:38:07+0800
+        if not utc or utc[-5] not in "+-":
+            # Fallback: use local timezone offset
+            offset = time.timezone if time.daylight == 0 else time.altzone
+            sign = "-" if offset > 0 else "+"
+            offset = abs(offset)
+            utc = time.strftime(f"%Y-%m-%dT%H:%M:%S{sign}{offset // 3600:02d}{offset % 3600 // 60:02d}")
 
-        ts = str(int(time.time()))
-        date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+        params = {
+            "accessKeyId": self._api_key,
+            "appId": self._app_id,
+            "uuid": _uuid.uuid4().hex,
+            "utc": utc,
+            "audio_encode": "pcm_s16le",
+            "lang": "autodialect",
+            "samplerate": "16000",
+        }
 
-        # Signature origin: HTTP request line + host + date
-        sign_origin = f"host: {host}\ndate: {date}\nGET {path} HTTP/1.1"
-        sign = hmac.new(
-            self._api_secret.encode("utf-8"),
-            sign_origin.encode("utf-8"),
-            hashlib.sha256,
-        ).digest()
-        signature = base64.b64encode(sign).decode("utf-8")
+        # Sort by key, URL-encode keys and values
+        sorted_params = sorted(params.items())
+        base_string = "&".join(f"{quote(k, safe='')}={quote(v, safe='')}" for k, v in sorted_params)
 
-        # Authorization header value (passed as query param)
-        auth = (
-            f'api_key="{self._api_key}", '
-            f'algorithm="hmac-sha256", '
-            f'headers="host date request-line", '
-            f'signature="{signature}"'
-        )
+        # HmacSHA1 with accessKeySecret as key
+        signature = base64.b64encode(
+            hmac.new(
+                self._api_secret.encode("utf-8"),
+                base_string.encode("utf-8"),
+                hashlib.sha1,
+            ).digest()
+        ).decode("utf-8")
 
-        params = urlencode({
-            "authorization": base64.b64encode(auth.encode()).decode(),
-            "date": date,
-            "host": host,
-        })
-        return f"{self._ws_url}?{params}"
+        # Append signature to query string
+        full_qs = f"{base_string}&{quote('signature', safe='')}={quote(signature, safe='')}"
+        return f"{self._base_url}?{full_qs}"
 
     async def _connect(self) -> bool:
         url = self._build_url()
+        log_url = url.split("?")[0]
+        log_params = url.split("?")[1] if "?" in url else ""
+        logger.info(f"IFlytek RTASR connecting: {log_url}")
+        logger.info(f"IFlytek RTASR params: {log_params[:200]}...")
         try:
             self._ws = await websockets.connect(url, ping_interval=30)
-            self._connected = True
-            logger.info(f"IFlytek RTASR connected ({self._ws_url})")
-            return True
+            # Wait for "started" handshake response
+            greeting = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
+            msg = json.loads(greeting)
+            logger.info(f"IFlytek RTASR greeting: {greeting[:500]}")
+            # Response: { "msg_type": "action", "data": { "action": "started", "sessionId": "..." } }
+            data = msg.get("data", {})
+            action = data.get("action", "") if isinstance(data, dict) else ""
+            if action == "started":
+                self._session_id = data.get("sessionId", "")
+                self._connected = True
+                logger.info(f"IFlytek RTASR started, sessionId={self._session_id}")
+                return True
+            else:
+                code = msg.get("code", data.get("code", "?"))
+                desc = msg.get("desc", data.get("desc", ""))
+                logger.error(f"IFlytek RTASR handshake failed: action={action} code={code} desc={desc}")
+                await self._ws.close()
+                return False
+        except asyncio.TimeoutError:
+            logger.error("IFlytek RTASR handshake timeout (no 'started' response)")
+            return False
         except Exception as e:
             logger.error(f"IFlytek RTASR connection failed: {e}")
             return False
@@ -111,32 +144,51 @@ class IFlytekRTASR(StreamingASR):
         self._buffer += pcm_bytes
 
         try:
+            # Send buffered frames
             while len(self._buffer) >= self.FRAME_SIZE:
                 frame = self._buffer[:self.FRAME_SIZE]
                 self._buffer = self._buffer[self.FRAME_SIZE:]
                 await self._ws.send(frame)
 
-            try:
-                resp = await asyncio.wait_for(self._ws.recv(), timeout=0.1)
-                msg = json.loads(resp)
-                code = str(msg.get("code", ""))
-                if code == "0" and msg.get("data"):
-                    text = self._parse_rtasr_result(msg["data"])
-                    if text:
+            # Drain all available responses
+            for _ in range(20):
+                try:
+                    resp = await asyncio.wait_for(self._ws.recv(), timeout=0.1)
+                    msg = json.loads(resp)
+                    msg_type = msg.get("msg_type", "")
+
+                    # Extract action: may be top-level or inside data
+                    data = msg.get("data")
+                    if isinstance(data, dict):
+                        action = data.get("action", msg.get("action", ""))
+                    else:
                         action = msg.get("action", "")
-                        is_final = action == "result"
-                        yield ASRResult(text=text, is_final=is_final, timestamp=time.time())
-                elif code != "":
-                    logger.warning(f"IFlytek RTASR code={code}: {msg.get('desc', '')}")
-            except asyncio.TimeoutError:
-                pass
-        except websockets.ConnectionClosed:
-            logger.info("IFlytek RTASR connection closed")
+                    code = str(data.get("code", msg.get("code", ""))) if isinstance(data, dict) else str(msg.get("code", ""))
+                    desc = data.get("desc", msg.get("desc", "")) if isinstance(data, dict) else msg.get("desc", "")
+
+                    if action == "result" and code == "0":
+                        if data:
+                            text = self._parse_result(data)
+                            if text:
+                                # ls=true → final; cn.st.type=0 → confirmed result
+                                if isinstance(data, dict):
+                                    is_final = data.get("ls", False) or data.get("cn", {}).get("st", {}).get("type", 1) == 0
+                                else:
+                                    is_final = False
+                                yield ASRResult(text=text, is_final=is_final, timestamp=time.time())
+                    elif action == "error" or msg_type == "error":
+                        logger.warning(f"IFlytek RTASR error: code={code} desc={desc}")
+                except asyncio.TimeoutError:
+                    break
+        except websockets.ConnectionClosed as e:
+            logger.warning(f"IFlytek RTASR connection closed: {e}")
             self._connected = False
             self._ws = None
+        except Exception as e:
+            logger.error(f"IFlytek RTASR process_chunk error: {e}")
 
-    def _parse_rtasr_result(self, data) -> str:
-        """Parse RTASR result data (may be str or dict)."""
+    def _parse_result(self, data) -> str:
+        """Parse RTASR result: data.cn.st.rt[].ws[].cw[].w"""
         try:
             obj = json.loads(data) if isinstance(data, str) else data
             text_parts = []
@@ -147,13 +199,16 @@ class IFlytekRTASR(StreamingASR):
                         if w:
                             text_parts.append(w)
             return "".join(text_parts)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"IFlytek RTASR parse error: {e}")
             return ""
 
     async def close(self):
         if self._ws and self._connected:
             try:
-                await self._ws.send(json.dumps({"end": True}))
+                end_msg = json.dumps({"end": True, "sessionId": self._session_id or ""})
+                logger.info(f"IFlytek RTASR sending end: {end_msg}")
+                await self._ws.send(end_msg)
             except Exception:
                 pass
             await self._ws.close()
@@ -176,7 +231,7 @@ class IFlytekIAT(StreamingASR):
     """
 
     WS_URL = "wss://iat-api.xfyun.cn/v2/iat"
-    FRAME_SIZE = 1280  # bytes per frame (40ms @ 16kHz 16bit)
+    FRAME_SIZE = 1280
 
     def __init__(self, config: AsrEngineConfig):
         self._app_id = config.app_id
@@ -185,26 +240,18 @@ class IFlytekIAT(StreamingASR):
         self._ws_url = config.base_url or self.WS_URL
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._connected = False
-        self._frame_status = 0  # 0=first, 1=continue, 2=last
+        self._frame_status = 0
         self._buffer = b""
 
     async def _connect(self) -> bool:
         ts = str(int(time.time()))
         signa = hashlib.md5(f"{self._app_id}{ts}{self._api_key}".encode()).hexdigest()
-
         params = urlencode({
-            "appid": self._app_id,
-            "ts": ts,
-            "signa": signa,
-            "lang": "en",
-            "punc": "1",
-            "format": "pcm",
-            "rate": "16000",
-            "channel": "1",
-            "ptt": "1",
+            "appid": self._app_id, "ts": ts, "signa": signa,
+            "lang": "en", "punc": "1", "format": "pcm",
+            "rate": "16000", "channel": "1", "ptt": "1",
         })
         url = f"{self._ws_url}?{params}"
-
         try:
             self._ws = await websockets.connect(url, ping_interval=30)
             self._connected = True
@@ -220,27 +267,19 @@ class IFlytekIAT(StreamingASR):
             return
         if self._ws is None:
             return
-
         self._buffer += pcm_bytes
-
         try:
             while len(self._buffer) >= self.FRAME_SIZE:
                 frame = self._buffer[:self.FRAME_SIZE]
                 self._buffer = self._buffer[self.FRAME_SIZE:]
-
                 data = {
                     "common": {"app_id": self._app_id},
                     "business": {"language": "en", "domain": "iat", "accent": "mandarin", "ptt": 1},
-                    "data": {
-                        "status": self._frame_status,
-                        "format": "audio/L16;rate=16000",
-                        "encoding": "raw",
-                        "audio": base64.b64encode(frame).decode(),
-                    },
+                    "data": {"status": self._frame_status, "format": "audio/L16;rate=16000",
+                             "encoding": "raw", "audio": base64.b64encode(frame).decode()},
                 }
                 await self._ws.send(json.dumps(data))
-                self._frame_status = 1  # continue
-
+                self._frame_status = 1
             try:
                 resp = await asyncio.wait_for(self._ws.recv(), timeout=0.1)
                 msg = json.loads(resp)
@@ -261,7 +300,6 @@ class IFlytekIAT(StreamingASR):
             self._ws = None
 
     def _parse_iat_result(self, data: dict) -> str:
-        """Parse IAT JSON result."""
         try:
             result_str = data.get("result", "")
             if not result_str:
@@ -281,15 +319,10 @@ class IFlytekIAT(StreamingASR):
         if self._ws and self._connected:
             try:
                 if self._buffer:
-                    last = {
-                        "data": {
-                            "status": 2,
-                            "format": "audio/L16;rate=16000",
-                            "encoding": "raw",
-                            "audio": base64.b64encode(self._buffer).decode(),
-                        },
-                    }
-                    await self._ws.send(json.dumps(last))
+                    await self._ws.send(json.dumps({
+                        "data": {"status": 2, "format": "audio/L16;rate=16000",
+                                 "encoding": "raw", "audio": base64.b64encode(self._buffer).decode()},
+                    }))
                 else:
                     await self._ws.send(json.dumps({"data": {"status": 2}}))
             except Exception:
