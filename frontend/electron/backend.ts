@@ -46,7 +46,11 @@ export async function startBackend(): Promise<void> {
   backendProcess = spawn(cmd, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
     cwd: findBackendCwd(),
-    env: { ...process.env, PORT: '0' }, // OS auto-assign port
+    env: {
+      ...process.env,
+      PORT: '0', // OS auto-assign port
+      MODELS_DIR: findModelsDir(), // Tell backend where models are
+    },
   });
 
   let stdoutBuffer = '';
@@ -115,6 +119,18 @@ function findBackendCwd(): string {
 
   // Bundled .exe doesn't need cwd
   return __dirname;
+}
+
+function findModelsDir(): string {
+  // Dev: __dirname = dist-electron/ → models is at ../../models
+  const devPath = join(__dirname, '..', '..', 'models');
+  if (existsSync(devPath)) return devPath;
+
+  // Prod: <app>/resources/models/
+  const prodPath = join(process.resourcesPath ?? '', 'models');
+  if (existsSync(prodPath)) return prodPath;
+
+  return '';
 }
 
 function findBackendCommand(): string {

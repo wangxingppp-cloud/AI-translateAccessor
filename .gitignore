@@ -9,6 +9,11 @@ venv/
 dist/
 dist-electron/
 release/
+obj/
+bin/
+publish/
+build/
+*.spec.bak
 
 # Models (too large for Git — use scripts/download_model.py)
 models/
