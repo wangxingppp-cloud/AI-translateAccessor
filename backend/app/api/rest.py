@@ -1,7 +1,13 @@
 """
-REST API routes — translation history, glossary, health.
+REST API routes — translation history, glossary, health, TTS.
 """
+import asyncio
+import wave
+import io
+
+import numpy as np
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +24,48 @@ def _svc(db: AsyncSession = Depends(get_session)):
 @router.get("/health")
 async def health_check():
     return {"status": "ok", "version": "0.1.0"}
+
+
+# ── TTS ────────────────────────────────────────────────────
+
+@router.post("/tts")
+async def tts_synthesize(data: dict):
+    """Synthesize speech from text using sherpa-onnx ZipVoice TTS.
+
+    Request body: {"text": "要合成的文字"}
+    Response: WAV audio bytes (audio/wav)
+    """
+    text = (data.get("text") or "").strip()
+    if not text:
+        return Response(content='{"error":"text is empty"}', status_code=400, media_type="application/json")
+    if len(text) > 500:
+        text = text[:500]
+
+    try:
+        from ..engines.tts.tts_engine import get_tts_engine
+        engine = get_tts_engine()
+        if not engine.is_ready():
+            return Response(content='{"error":"TTS model not loaded"}', status_code=503, media_type="application/json")
+
+        samples, sample_rate = await engine.synthesize_async(text)
+
+        if len(samples) == 0:
+            return Response(content='{"error":"TTS returned empty audio"}', status_code=500, media_type="application/json")
+
+        # float32 → int16 PCM → WAV
+        pcm_int16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_int16.tobytes())
+
+        return Response(content=buf.getvalue(), media_type="audio/wav")
+
+    except Exception as e:
+        logger.error(f"[TTS-API] ERROR: {e}", exc_info=True)
+        return Response(content=f'{{"error":"{e}"}}', status_code=500, media_type="application/json")
 
 
 @router.get("/debug/db-check")

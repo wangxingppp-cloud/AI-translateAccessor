@@ -65,6 +65,7 @@ export function SubtitleList({ entries, current, placeholder }: SubtitleListProp
       {entries.map((entry) => (
         <SubtitleLine
           key={entry.id}
+          id={entry.id}
           original={entry.original}
           translated={entry.translated}
           isCorrected={entry.isCorrected}
@@ -74,6 +75,7 @@ export function SubtitleList({ entries, current, placeholder }: SubtitleListProp
       {current && (
         <SubtitleLine
           key={`current-${current.id}`}
+          id={current.id}
           original={current.original}
           translated={current.translated}
           isCorrected={current.isCorrected}

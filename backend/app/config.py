@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     enable_correction: bool = True
 
+    # ── TTS ─────────────────────────────────────────────────
+    tts_model_path: str = ""            # defaults to models_dir/sherpa-onnx-zipvoice-distill-int8-zh-en-emilia
+    tts_num_threads: int = 2
+
     # ── Audio ─────────────────────────────────────────────────
     audio_chunk_ms: int = 200
     audio_buffer_size: int = 100        # ring buffer capacity (chunks)
